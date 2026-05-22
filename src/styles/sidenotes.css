@@ -5,7 +5,11 @@
   float: right;
   clear: right;
   width: 240px;
-  margin: 0.3rem 0 1rem 1.5rem;
+  /* Negative right margin pushes the sidenote out of the 660px paragraph
+     column into the prose container's right margin so it doesn't overlap
+     the body text. Paragraphs max at 660px; prose container max is 940px;
+     the sidenote occupies the gap. */
+  margin: 0.3rem -270px 1rem 1.5rem;
   font-family: var(--font-sans);
   font-size: 0.82rem;
   line-height: 1.5;
