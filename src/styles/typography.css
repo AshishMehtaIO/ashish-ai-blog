@@ -1,0 +1,137 @@
+/* Editorial typography inspired by thinkingmachines.ai */
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 2em 0 0.6em;
+}
+
+h1 {
+  font-size: clamp(2rem, 5vw, 2.875rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 0;
+}
+
+h2 {
+  font-size: 1.65rem;
+  margin-top: 2.5em;
+}
+
+h3 {
+  font-size: 1.3rem;
+  margin-top: 2em;
+}
+
+h4 {
+  font-size: 1.1rem;
+}
+
+p {
+  margin: 0 0 1.1em;
+  hyphens: auto;
+}
+
+p + p {
+  margin-top: 0;
+}
+
+blockquote {
+  margin: 1.5em 0;
+  padding: 0.25em 0 0.25em 1.25em;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+ul, ol {
+  margin: 0 0 1.1em;
+  padding-left: 1.5em;
+}
+
+li {
+  margin-bottom: 0.35em;
+}
+
+li > p {
+  margin: 0 0 0.5em;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--code-bg);
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  background: var(--code-bg);
+  padding: 1rem 1.25rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 1.5em 0;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5em 0;
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.65em 0.85em;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+  background: var(--code-bg);
+}
+
+figure {
+  margin: 2em 0;
+}
+
+figcaption {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 0.5em;
+  text-align: center;
+}
+
+/* KaTeX adjustments */
+.katex-display {
+  margin: 1.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Class for the article body — applies the prose styles */
+.prose {
+  font-family: var(--font-serif);
+  font-size: 1.1rem;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.prose > :first-child {
+  margin-top: 0;
+}

@@ -1,0 +1,98 @@
+@import './fonts.css';
+@import './typography.css';
+@import './sidenotes.css';
+@import 'katex/dist/katex.min.css';
+
+:root {
+  /* Colors — editorial, low-contrast palette inspired by thinkingmachines.ai */
+  --bg: #fbfaf7;
+  --bg-elevated: #ffffff;
+  --text: #1a1a1a;
+  --text-muted: #5a5a5a;
+  --text-faint: #8a8a8a;
+  --border: #e5e3dd;
+  --border-strong: #cfcdc6;
+  --accent: #1e3a8a;            /* deep indigo — used sparingly for links */
+  --accent-hover: #0b1f5c;
+  --code-bg: #f3f1ec;
+  --selection-bg: #e9e3cd;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+  --space-10: 8rem;
+
+  /* Reading widths */
+  --content-width: 680px;
+  --content-width-wide: 920px;
+  --content-width-full: 1240px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14130f;
+    --bg-elevated: #1c1b17;
+    --text: #ebe9e2;
+    --text-muted: #a8a59c;
+    --text-faint: #6e6c64;
+    --border: #2a2924;
+    --border-strong: #3d3b35;
+    --accent: #a8b8ff;
+    --accent-hover: #c7d1ff;
+    --code-bg: #1f1e1a;
+    --selection-bg: #3a3525;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  background: var(--bg);
+  color: var(--text);
+}
+
+::selection {
+  background: var(--selection-bg);
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+img, video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: var(--space-7) 0;
+}

@@ -1,0 +1,134 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+
+const posts = (await getCollection('blog'))
+  .filter((p) => !p.data.draft)
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+
+const fmt = (d: Date) =>
+  d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+---
+
+<BaseLayout title="Ashish — Writing">
+  <section class="hero">
+    <h1 class="hero-title">Notes on engineering, AI, and the things in between.</h1>
+    <p class="hero-sub">
+      Field notes from building software, thinking about systems, and chasing the occasional rabbit hole.
+    </p>
+  </section>
+
+  <section class="post-list">
+    <h2 class="section-title">Recent writing</h2>
+    <ol>
+      {posts.map((post) => (
+        <li>
+          <a href={`/blog/${post.id}`} class="post-link">
+            <time datetime={post.data.pubDate.toISOString()}>{fmt(post.data.pubDate)}</time>
+            <span class="post-title">{post.data.title}</span>
+          </a>
+          {post.data.description && <p class="post-desc">{post.data.description}</p>}
+        </li>
+      ))}
+    </ol>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    max-width: var(--content-width-wide);
+    margin: 5rem auto 4rem;
+    padding: 0 1.5rem;
+  }
+
+  .hero-title {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 1.25rem;
+  }
+
+  .hero-sub {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+    max-width: 36em;
+    margin: 0;
+  }
+
+  .post-list {
+    max-width: var(--content-width-wide);
+    margin: 4rem auto;
+    padding: 0 1.5rem;
+  }
+
+  .section-title {
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-faint);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+    margin: 0 0 1.5rem;
+  }
+
+  .post-list ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .post-list li {
+    padding: 1.5rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .post-link {
+    display: grid;
+    grid-template-columns: 11rem 1fr;
+    gap: 1.5rem;
+    align-items: baseline;
+    text-decoration: none;
+    color: var(--text);
+  }
+
+  .post-link time {
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-faint);
+    letter-spacing: 0.02em;
+  }
+
+  .post-link .post-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    transition: color 0.15s ease;
+  }
+
+  .post-link:hover .post-title {
+    color: var(--accent);
+  }
+
+  .post-desc {
+    margin: 0.65rem 0 0;
+    margin-left: calc(11rem + 1.5rem);
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 700px) {
+    .post-link {
+      grid-template-columns: 1fr;
+      gap: 0.35rem;
+    }
+    .post-desc {
+      margin-left: 0;
+    }
+  }
+</style>

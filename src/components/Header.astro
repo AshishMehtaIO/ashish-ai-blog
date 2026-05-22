@@ -1,0 +1,66 @@
+---
+const { pathname } = Astro.url;
+const isActive = (path: string) => pathname === path || pathname.startsWith(path + '/');
+---
+
+<header class="site-header">
+  <div class="container">
+    <a href="/" class="logo">ASHISH</a>
+    <nav class="top-nav" aria-label="Primary">
+      <a href="/" class:list={[{ active: pathname === '/' }]}>Home</a>
+      <a href="/blog" class:list={[{ active: isActive('/blog') }]}>Writing</a>
+      <a href="/about" class:list={[{ active: isActive('/about') }]}>About</a>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    border-bottom: 1px solid var(--border);
+    padding: 1.1rem 1.5rem;
+    background: var(--bg);
+  }
+
+  .container {
+    max-width: var(--content-width-full);
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+  }
+
+  .logo {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    font-size: 0.95rem;
+    color: var(--text);
+    text-decoration: none;
+  }
+
+  .top-nav {
+    display: flex;
+    gap: 1.75rem;
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .top-nav a {
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+
+  .top-nav a:hover,
+  .top-nav a.active {
+    color: var(--text);
+  }
+
+  @media (max-width: 600px) {
+    .top-nav {
+      gap: 1rem;
+    }
+  }
+</style>

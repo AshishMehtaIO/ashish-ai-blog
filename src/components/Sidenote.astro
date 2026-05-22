@@ -1,0 +1,13 @@
+---
+// Tufte-style sidenote. Use in MDX:
+//   import Sidenote from '../../components/Sidenote.astro';
+//   <Sidenote id="note-1">Your note content here.</Sidenote>
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+---
+
+<label for={id} class="sidenote-number" />
+<input type="checkbox" id={id} class="margin-toggle" />
+<span class="sidenote"><slot /></span>

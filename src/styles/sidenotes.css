@@ -1,0 +1,80 @@
+/* Tufte-style sidenotes — adapted from tufte-css
+   https://github.com/edwardtufte/tufte-css */
+
+.sidenote {
+  float: right;
+  clear: right;
+  width: 240px;
+  margin: 0.3rem 0 1rem 1.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  vertical-align: baseline;
+  position: relative;
+}
+
+.sidenote-number {
+  counter-increment: sidenote-counter;
+}
+
+.sidenote-number::after {
+  content: counter(sidenote-counter);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  top: -0.5rem;
+  left: 0.1rem;
+  position: relative;
+  vertical-align: baseline;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.sidenote::before {
+  content: counter(sidenote-counter) ' ';
+  font-weight: 600;
+  color: var(--accent);
+  margin-right: 0.3em;
+}
+
+.prose {
+  counter-reset: sidenote-counter;
+}
+
+/* Checkbox toggle (hidden on desktop, used on mobile) */
+input.margin-toggle {
+  display: none;
+}
+
+label.sidenote-number {
+  display: inline;
+}
+
+label.margin-toggle:not(.sidenote-number) {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  label.margin-toggle:not(.sidenote-number) {
+    display: inline;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .sidenote {
+    display: none;
+  }
+
+  .margin-toggle:checked + .sidenote {
+    display: block;
+    float: left;
+    left: 1rem;
+    clear: both;
+    width: 95%;
+    margin: 1rem 2.5%;
+    padding: 0.75rem 1rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+    position: relative;
+  }
+}

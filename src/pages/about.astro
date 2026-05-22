@@ -1,0 +1,29 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="About — Ashish">
+  <article class="about prose">
+    <h1>About</h1>
+    <p>
+      I'm Ashish — an engineer. This is where I write about the things I'm
+      building, the ideas I'm chewing on, and the occasional rabbit hole.
+    </p>
+    <p>
+      Best way to reach me is over email. The RSS feed is at
+      <a href="/rss.xml">/rss.xml</a>.
+    </p>
+  </article>
+</BaseLayout>
+
+<style>
+  .about {
+    max-width: var(--content-width);
+    margin: 5rem auto;
+    padding: 0 1.5rem;
+  }
+  .about h1 {
+    font-size: 2.25rem;
+    margin: 0 0 1.5rem;
+  }
+</style>

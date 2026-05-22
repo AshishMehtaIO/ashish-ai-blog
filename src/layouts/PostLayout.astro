@@ -1,0 +1,187 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import TableOfContents from '../components/TableOfContents.astro';
+
+interface Heading {
+  depth: number;
+  slug: string;
+  text: string;
+}
+
+interface Props {
+  title: string;
+  description?: string;
+  pubDate: Date;
+  updatedDate?: Date;
+  author?: string;
+  cover?: string;
+  headings?: Heading[];
+}
+
+const {
+  title,
+  description,
+  pubDate,
+  updatedDate,
+  author = 'Ashish',
+  cover,
+  headings = [],
+} = Astro.props;
+
+const fmt = (d: Date) =>
+  d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+---
+
+<BaseLayout title={title} description={description} image={cover}>
+  <article class="post">
+    <header class="post-heading">
+      <h1 class="post-title">{title}</h1>
+      <div class="publish-metadata">
+        <span class="author">{author}</span>
+        <span class="separator">·</span>
+        <time datetime={pubDate.toISOString()}>{fmt(pubDate)}</time>
+        {updatedDate && (
+          <>
+            <span class="separator">·</span>
+            <span class="updated">Updated {fmt(updatedDate)}</span>
+          </>
+        )}
+      </div>
+    </header>
+
+    {cover && (
+      <div class="post-cover">
+        <img src={cover} alt="" />
+      </div>
+    )}
+
+    <div class="post-content-shell">
+      <aside class="left-toc">
+        <TableOfContents headings={headings} />
+      </aside>
+      <div class="content-area">
+        <div class="prose">
+          <slot />
+        </div>
+      </div>
+    </div>
+  </article>
+</BaseLayout>
+
+<style>
+  .post {
+    max-width: var(--content-width-full);
+    margin: 0 auto;
+    padding: 4rem 1.5rem 2rem;
+  }
+
+  .post-heading {
+    max-width: var(--content-width-wide);
+    margin: 0 auto 3rem;
+    text-align: left;
+  }
+
+  .post-title {
+    font-size: clamp(2rem, 5vw, 2.875rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 1.25rem;
+    font-weight: 600;
+  }
+
+  .publish-metadata {
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .publish-metadata .separator {
+    color: var(--text-faint);
+  }
+
+  .post-cover {
+    max-width: var(--content-width-wide);
+    margin: 0 auto 3.5rem;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .post-content-shell {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 3.5rem;
+    align-items: start;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  .left-toc {
+    position: sticky;
+    top: 4rem;
+    padding-top: 0.25rem;
+  }
+
+  .content-area {
+    min-width: 0;
+    position: relative;
+  }
+
+  /* The article: wide enough to hold prose + a sidenote rail to the right */
+  .content-area :global(.prose) {
+    max-width: 940px;
+  }
+
+  /* Constrain prose block elements to a readable width; sidenotes are excluded */
+  .content-area :global(.prose > p),
+  .content-area :global(.prose > h1),
+  .content-area :global(.prose > h2),
+  .content-area :global(.prose > h3),
+  .content-area :global(.prose > h4),
+  .content-area :global(.prose > ul),
+  .content-area :global(.prose > ol),
+  .content-area :global(.prose > blockquote),
+  .content-area :global(.prose > pre),
+  .content-area :global(.prose > figure),
+  .content-area :global(.prose > .katex-display),
+  .content-area :global(.prose > hr) {
+    max-width: 660px;
+  }
+
+  /* Tables can be a bit wider */
+  .content-area :global(.prose > table) {
+    max-width: 720px;
+  }
+
+  @media (max-width: 1100px) {
+    .post-content-shell {
+      grid-template-columns: minmax(0, 680px);
+      justify-content: center;
+      gap: 0;
+    }
+    .left-toc {
+      display: none;
+    }
+    .content-area :global(.prose) {
+      max-width: 680px;
+    }
+    .content-area :global(.prose > p),
+    .content-area :global(.prose > h1),
+    .content-area :global(.prose > h2),
+    .content-area :global(.prose > h3),
+    .content-area :global(.prose > h4),
+    .content-area :global(.prose > ul),
+    .content-area :global(.prose > ol),
+    .content-area :global(.prose > blockquote),
+    .content-area :global(.prose > pre),
+    .content-area :global(.prose > figure),
+    .content-area :global(.prose > table),
+    .content-area :global(.prose > .katex-display),
+    .content-area :global(.prose > hr) {
+      max-width: 100%;
+    }
+  }
+</style>

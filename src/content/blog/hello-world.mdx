@@ -1,0 +1,59 @@
+---
+title: "Hello, world"
+description: "A first post — a tour of how this blog is set up and what it can do."
+pubDate: 2026-05-22
+author: "Ashish"
+tags: ["meta"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+
+This is the first post on the blog. I built it in [Astro](https://astro.build), modeled visually on the [Thinking Machines blog](https://thinkingmachines.ai/blog/interaction-models/). The aesthetic I was after is editorial — closer to a magazine or a research paper than a typical developer blog.
+
+## Why this layout
+
+Most engineering blogs default to a single-column markdown render with a sans-serif body font and a sidebar of links. That's fine. It's also forgettable. The Thinking Machines design borrows from two traditions worth borrowing from:<Sidenote id="sn-1">Edward Tufte's *Beautiful Evidence* (2006) and the Distill team's research-paper aesthetic.</Sidenote> Tufte-style sidenotes that put context in the margin instead of breaking the prose with footnotes, and a serif body that takes longform reading seriously.
+
+## What works on this blog
+
+A short tour of features.
+
+### Sidenotes
+
+The number to the right of this sentence is a sidenote.<Sidenote id="sn-2">Like this one. On desktop they float in the right margin; on narrower screens they collapse to inline expandable notes via a checkbox toggle. No JavaScript needed.</Sidenote> Click or tap the number to toggle it on mobile. The pattern is borrowed from `tufte-css`.
+
+### Math
+
+KaTeX renders inline math like $e^{i\pi} + 1 = 0$ and display math:
+
+$$
+\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}
+$$
+
+### Code
+
+Syntax highlighting via Shiki, the same renderer VS Code uses:
+
+```python
+def attention(q, k, v):
+    scores = q @ k.transpose(-2, -1) / math.sqrt(q.size(-1))
+    weights = scores.softmax(dim=-1)
+    return weights @ v
+```
+
+### Tables
+
+| Component       | Library              | Notes                          |
+| --------------- | -------------------- | ------------------------------ |
+| Static site     | Astro 5              | Content collections, MDX       |
+| Math            | KaTeX                | remark-math + rehype-katex     |
+| Syntax          | Shiki                | Built into Astro               |
+| Body font       | Source Serif 4       | Variable, served via Google    |
+| UI font         | Inter                | Variable                       |
+| Display font    | Chakra Petch         | For the wordmark in the header |
+
+## Next steps
+
+Things I want to add next: a tag index, sparkline-style metadata visualizations on the post archive, a printable view, and self-hosted fonts to drop the Google Fonts request.
+
+Welcome.
