@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { getCollection } from 'astro:content';
+import { url } from '../../utils/url';
 
 const posts = (await getCollection('blog'))
   .filter((p) => !p.data.draft)
@@ -20,7 +21,7 @@ const fmt = (d: Date) =>
     <ol class="post-list">
       {posts.map((post) => (
         <li>
-          <a href={`/blog/${post.id}`} class="post-link">
+          <a href={url(`blog/${post.id}`)} class="post-link">
             <time datetime={post.data.pubDate.toISOString()}>{fmt(post.data.pubDate)}</time>
             <span class="post-title">{post.data.title}</span>
           </a>

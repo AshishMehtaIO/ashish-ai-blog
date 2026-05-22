@@ -1,5 +1,6 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import { url } from '../utils/url';
 ---
 
 <BaseLayout title="About — Ashish">
@@ -11,7 +12,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     </p>
     <p>
       Best way to reach me is over email. The RSS feed is at
-      <a href="/rss.xml">/rss.xml</a>.
+      <a href={url('rss.xml')}>/rss.xml</a>.
     </p>
   </article>
 </BaseLayout>

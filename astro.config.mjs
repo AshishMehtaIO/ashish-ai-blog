@@ -4,11 +4,15 @@ import sitemap from '@astrojs/sitemap';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 
-// Update SITE_URL to your final hosting URL (e.g. https://username.github.io/blog)
-const SITE_URL = 'https://example.com';
+// Deployed at https://ashishmehtaio.github.io/ashish-ai-blog/
+// `site` = origin only, `base` = the repo subpath (without trailing slash).
+const SITE_URL = 'https://ashishmehtaio.github.io';
+const BASE = '/ashish-ai-blog';
 
 export default defineConfig({
   site: SITE_URL,
+  base: BASE,
+  trailingSlash: 'ignore',
   integrations: [
     mdx(),
     sitemap(),

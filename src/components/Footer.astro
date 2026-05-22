@@ -1,4 +1,5 @@
 ---
+import { url } from '../utils/url';
 const year = new Date().getFullYear();
 ---
 
@@ -6,8 +7,8 @@ const year = new Date().getFullYear();
   <div class="container">
     <span class="copy">© {year} Ashish</span>
     <nav class="footer-nav" aria-label="Footer">
-      <a href="/rss.xml">RSS</a>
-      <a href="https://github.com/ashish" target="_blank" rel="noopener">GitHub</a>
+      <a href={url('rss.xml')}>RSS</a>
+      <a href="https://github.com/AshishMehtaIO" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </footer>
