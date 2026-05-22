@@ -1,0 +1,342 @@
+---
+// Viz 9 — Sync vs Async rollout timing diagram. Toggle between three modes:
+// sync (sequential), one-step-off (1-step staleness), fully async. Shows
+// rollout and training as bars on a time axis; the overlap is the win.
+---
+
+<figure class="gantt-figure" aria-label="Sync vs async rollout timing chart">
+  <div class="gantt-tabs" role="tablist">
+    <button type="button" role="tab" class="gantt-tab active" data-mode="sync"      aria-selected="true">Synchronous</button>
+    <button type="button" role="tab" class="gantt-tab"        data-mode="one-step"  aria-selected="false">One-step-off async</button>
+    <button type="button" role="tab" class="gantt-tab"        data-mode="full-async" aria-selected="false">Fully async</button>
+  </div>
+
+  <svg viewBox="0 0 720 260" class="gantt-svg" role="img" preserveAspectRatio="xMidYMid meet">
+    <!-- Lane labels -->
+    <text x="14" y="64"  class="gantt-lane-label">rollout pool</text>
+    <text x="14" y="148" class="gantt-lane-label">training pool</text>
+
+    <!-- Lane backgrounds -->
+    <rect x="120" y="40"  width="580" height="50" class="gantt-lane-bg" />
+    <rect x="120" y="124" width="580" height="50" class="gantt-lane-bg" />
+
+    <!-- Time axis -->
+    <line x1="120" y1="200" x2="700" y2="200" class="gantt-axis" />
+    <g data-region="ticks"></g>
+    <text x="410" y="232" class="gantt-axis-label" text-anchor="middle">time →</text>
+
+    <!-- Bars -->
+    <g data-region="bars"></g>
+  </svg>
+
+  <div class="gantt-stats">
+    <div class="gantt-stat">
+      <span class="gantt-stat-label">end-to-end wall time</span>
+      <strong data-readout="time">100%</strong>
+    </div>
+    <div class="gantt-stat">
+      <span class="gantt-stat-label">policy staleness</span>
+      <strong data-readout="staleness">0 steps</strong>
+    </div>
+    <div class="gantt-stat">
+      <span class="gantt-stat-label">GPU utilization</span>
+      <strong data-readout="util">low</strong>
+    </div>
+  </div>
+
+  <div class="gantt-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    Sync RL leaves one pool idle while the other works. Async overlaps generation and training,
+    paying a small staleness cost (the data the trainer sees is one step behind the policy that
+    generated it). One-step-off bounds the staleness; fully async lets it grow but maximizes
+    overlap.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Mode = 'sync' | 'one-step' | 'full-async';
+
+    type Bar = { lane: 'rollout' | 'training'; start: number; dur: number; label: string };
+    type Spec = {
+      time: string;
+      staleness: string;
+      util: string;
+      callout: string;
+      bars: Bar[];
+    };
+
+    // Time axis: 0..100 (relative units), 580px wide starting at x=120
+    const T0 = 120;
+    const TW = 580;
+    const SCALE = TW / 100;
+    const LANE_ROLL_Y = 50;
+    const LANE_TRAIN_Y = 134;
+    const BAR_H = 30;
+
+    const SPECS: Record<Mode, Spec> = {
+      sync: {
+        time: '100% (baseline)',
+        staleness: '0 steps',
+        util: 'low (~50%)',
+        callout: 'Phases alternate strictly. The rollout pool finishes batch i, hands off, then sits idle while the training pool processes batch i. Each pool is doing useful work roughly half the time. The simplest model, also the slowest.',
+        bars: [
+          { lane: 'rollout',  start: 0,  dur: 22, label: 'gen batch 1' },
+          { lane: 'training', start: 22, dur: 18, label: 'train on batch 1' },
+          { lane: 'rollout',  start: 40, dur: 22, label: 'gen batch 2' },
+          { lane: 'training', start: 62, dur: 18, label: 'train on batch 2' },
+          { lane: 'rollout',  start: 80, dur: 22, label: 'gen batch 3' },
+        ],
+      },
+      'one-step': {
+        time: '~70%',
+        staleness: 'exactly 1 step',
+        util: 'high (~85%)',
+        callout: 'While the trainer processes batch i, the rollout pool generates batch i+1 in parallel. The two complete around the same time, then the new weights transfer. The trainer always sees data that\'s one step behind the current policy — small enough that PPO\'s importance-sampling correction absorbs the drift.',
+        bars: [
+          { lane: 'rollout',  start: 0,  dur: 22, label: 'gen batch 1' },
+          { lane: 'training', start: 22, dur: 18, label: 'train on batch 1' },
+          { lane: 'rollout',  start: 22, dur: 22, label: 'gen batch 2' },
+          { lane: 'training', start: 44, dur: 18, label: 'train on batch 2' },
+          { lane: 'rollout',  start: 44, dur: 22, label: 'gen batch 3' },
+          { lane: 'training', start: 66, dur: 18, label: 'train on batch 3' },
+          { lane: 'rollout',  start: 66, dur: 14, label: 'gen 4...' },
+        ],
+      },
+      'full-async': {
+        time: '~55%',
+        staleness: 'variable (1–N steps)',
+        util: 'maximal (~95%)',
+        callout: 'Both pools run flat out. Rollout produces continuously; the trainer consumes whatever\'s ready when it\'s ready. Staleness varies — a sample might be from the policy 3 steps ago. The IS correction does heavier lifting, and you need bookkeeping to remember which policy version produced which sample. Maximum throughput, most engineering.',
+        bars: [
+          { lane: 'rollout',  start: 0,  dur: 16, label: 'gen 1' },
+          { lane: 'rollout',  start: 16, dur: 17, label: 'gen 2' },
+          { lane: 'rollout',  start: 33, dur: 16, label: 'gen 3' },
+          { lane: 'rollout',  start: 49, dur: 16, label: 'gen 4' },
+          { lane: 'rollout',  start: 65, dur: 17, label: 'gen 5' },
+          { lane: 'rollout',  start: 82, dur: 12, label: 'gen 6' },
+          { lane: 'training', start: 12, dur: 13, label: 'train 1' },
+          { lane: 'training', start: 25, dur: 14, label: 'train 2' },
+          { lane: 'training', start: 39, dur: 13, label: 'train 3' },
+          { lane: 'training', start: 52, dur: 14, label: 'train 4' },
+          { lane: 'training', start: 66, dur: 13, label: 'train 5' },
+          { lane: 'training', start: 79, dur: 14, label: 'train 6' },
+        ],
+      },
+    };
+
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent?: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+
+    document.querySelectorAll<HTMLElement>('.gantt-figure').forEach((fig) => {
+      const barsG    = fig.querySelector<SVGGElement>('[data-region="bars"]')!;
+      const ticksG   = fig.querySelector<SVGGElement>('[data-region="ticks"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const timeEl   = fig.querySelector<HTMLElement>('[data-readout="time"]')!;
+      const staleEl  = fig.querySelector<HTMLElement>('[data-readout="staleness"]')!;
+      const utilEl   = fig.querySelector<HTMLElement>('[data-readout="util"]')!;
+      const tabs     = Array.from(fig.querySelectorAll<HTMLButtonElement>('.gantt-tab'));
+
+      // Draw tick marks once
+      function drawTicks() {
+        ticksG.replaceChildren();
+        for (let t = 0; t <= 100; t += 10) {
+          const x = T0 + t * SCALE;
+          el('line', { x1: x, y1: 197, x2: x, y2: 203, class: 'gantt-tick' }, ticksG);
+        }
+      }
+
+      function render(mode: Mode) {
+        const spec = SPECS[mode];
+        barsG.replaceChildren();
+        drawTicks();
+
+        spec.bars.forEach((bar, i) => {
+          const x = T0 + bar.start * SCALE;
+          const w = Math.max(2, bar.dur * SCALE - 2);
+          const y = bar.lane === 'rollout' ? LANE_ROLL_Y : LANE_TRAIN_Y;
+          const cls = bar.lane === 'rollout' ? 'gantt-bar gantt-bar-rollout' : 'gantt-bar gantt-bar-training';
+          const wrap = el('g', { class: cls }, barsG) as SVGGElement;
+          wrap.style.setProperty('--stagger', String(i * 40));
+          el('rect', { x: x, y: y, width: w, height: BAR_H, rx: 4, class: 'gantt-bar-rect' }, wrap);
+          if (w > 60) {
+            el('text', { x: x + w / 2, y: y + BAR_H / 2 + 4, class: 'gantt-bar-label', 'text-anchor': 'middle' }, wrap).textContent = bar.label;
+          }
+        });
+
+        timeEl.textContent  = spec.time;
+        staleEl.textContent = spec.staleness;
+        utilEl.textContent  = spec.util;
+        calloutEl.textContent = spec.callout;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render((t.getAttribute('data-mode') || 'sync') as Mode);
+        });
+      });
+      render('sync');
+    });
+  })();
+</script>
+
+<style>
+  .gantt-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+  .gantt-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .gantt-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .gantt-tab:hover { color: var(--text); border-color: var(--accent); }
+  .gantt-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .gantt-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+
+  .gantt-lane-label {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .gantt-lane-bg {
+    fill: var(--code-bg);
+    opacity: 0.7;
+    rx: 4;
+  }
+  .gantt-axis {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+  .gantt-axis-label {
+    fill: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* :global() — created via JS */
+  .gantt-figure :global(.gantt-tick) {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+  .gantt-figure :global(.gantt-bar-rect) {
+    transition: opacity 200ms ease;
+    animation: gantt-grow 380ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--stagger) * 1ms);
+    transform-origin: left;
+  }
+  .gantt-figure :global(.gantt-bar-rollout .gantt-bar-rect) {
+    fill: #f5e0c3;
+    stroke: #d08a3e;
+    stroke-width: 1.2;
+  }
+  .gantt-figure :global(.gantt-bar-training .gantt-bar-rect) {
+    fill: #dde5f3;
+    stroke: #4a78c2;
+    stroke-width: 1.2;
+  }
+  .gantt-figure :global(.gantt-bar-label) {
+    fill: var(--text);
+    font-size: 10.5px;
+    font-weight: 500;
+    font-family: var(--font-sans);
+    pointer-events: none;
+  }
+  .gantt-figure :global(.gantt-bar-rollout .gantt-bar-label)  { fill: #6b4422; }
+  .gantt-figure :global(.gantt-bar-training .gantt-bar-label) { fill: #1e3a8a; }
+
+  @keyframes gantt-grow {
+    from { transform: scaleX(0); opacity: 0; }
+    to   { transform: scaleX(1); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gantt-figure :global(.gantt-bar-rect) { animation: none; }
+  }
+
+  .gantt-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.85rem;
+    margin-top: 0.9rem;
+  }
+  @media (max-width: 640px) {
+    .gantt-stats { grid-template-columns: 1fr; }
+  }
+  .gantt-stat {
+    padding: 0.65rem 0.85rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+    display: grid;
+    gap: 0.25rem;
+  }
+  .gantt-stat-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .gantt-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    color: var(--text);
+    font-weight: 600;
+  }
+  .gantt-callout {
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    border-left: 2px solid var(--accent);
+    background: var(--code-bg);
+    border-radius: 0 4px 4px 0;
+  }
+  .gantt-callout p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+</style>

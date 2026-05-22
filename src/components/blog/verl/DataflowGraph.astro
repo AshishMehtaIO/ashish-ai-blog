@@ -1,0 +1,366 @@
+---
+// Viz 5 — RL-as-dataflow-graph triptych. Switch between PPO, GRPO, and DAPO
+// to see how each algorithm's dataflow differs. Nodes are colored by phase
+// (generation / preparation / training).
+//
+// Inspired by Figures 1 and 5 of the HybridFlow paper (arxiv 2409.19256v2).
+// Pattern: hand-authored SVG + per-figure script, vanilla JS, :global() on
+// dynamic elements so they pick up CSS variables.
+---
+
+<figure class="dataflow-figure" aria-label="Algorithm dataflow graph comparison">
+  <div class="dataflow-tabs" role="tablist">
+    <button type="button" role="tab" class="dataflow-tab active" data-algo="ppo"  aria-selected="true">PPO</button>
+    <button type="button" role="tab" class="dataflow-tab"        data-algo="grpo" aria-selected="false">GRPO</button>
+    <button type="button" role="tab" class="dataflow-tab"        data-algo="dapo" aria-selected="false">DAPO</button>
+  </div>
+
+  <div class="dataflow-legend">
+    <span class="leg leg-src">prompt</span>
+    <span class="leg leg-gen">generation</span>
+    <span class="leg leg-prep">preparation</span>
+    <span class="leg leg-train">training</span>
+  </div>
+
+  <svg
+    viewBox="0 0 720 540"
+    class="dataflow-svg"
+    role="img"
+    preserveAspectRatio="xMidYMid meet"
+  >
+    <defs>
+      <marker id="dataflow-arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+    <g data-region="edges"></g>
+    <g data-region="nodes"></g>
+  </svg>
+
+  <div class="dataflow-callout" data-region="callout">
+    <p>Click a tab to compare. Nodes are operators; arrows are tensors flowing between them.</p>
+  </div>
+
+  <figcaption>
+    Each RL algorithm is a directed graph of operators. PPO, GRPO, and DAPO differ in which
+    operators exist (PPO has a critic and GAE; GRPO and DAPO use group statistics instead),
+    not in the surrounding machinery. Recognizing this is what makes one framework support
+    many algorithms.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Phase = 'src' | 'gen' | 'prep' | 'train';
+    type Node = { id: string; label: string; phase: Phase; x: number; y: number; w?: number; tip?: string };
+    type Edge = [string, string];
+    type Algo = { nodes: Node[]; edges: Edge[]; callout: string };
+
+    const NW = 110; // node width default
+    const NH = 32;  // node height
+
+    const PPO: Algo = {
+      callout: 'PPO needs a value function (critic), so the dataflow is widest. The critic\'s output flows into GAE alongside rewards, and both actor and critic are updated each step.',
+      nodes: [
+        { id: 'prompt',  label: 'prompt',         phase: 'src',   x: 360, y: 36 },
+        { id: 'rollout', label: 'rollout',        phase: 'gen',   x: 360, y: 110 },
+        { id: 'oldlp',   label: 'old logprob',    phase: 'prep',  x: 120, y: 200 },
+        { id: 'reflp',   label: 'ref logprob',    phase: 'prep',  x: 280, y: 200 },
+        { id: 'reward',  label: 'reward',         phase: 'prep',  x: 440, y: 200 },
+        { id: 'value',   label: 'value (critic)', phase: 'prep',  x: 600, y: 200 },
+        { id: 'kladj',   label: 'KL-adjusted r',  phase: 'prep',  x: 360, y: 290 },
+        { id: 'gae',     label: 'GAE',            phase: 'prep',  x: 520, y: 360 },
+        { id: 'adv',     label: 'advantages',     phase: 'prep',  x: 360, y: 430 },
+        { id: 'actor',   label: 'actor update',   phase: 'train', x: 240, y: 500 },
+        { id: 'critic',  label: 'critic update',  phase: 'train', x: 520, y: 500 },
+      ],
+      edges: [
+        ['prompt', 'rollout'],
+        ['rollout', 'oldlp'], ['rollout', 'reflp'], ['rollout', 'reward'], ['rollout', 'value'],
+        ['reflp', 'kladj'], ['reward', 'kladj'],
+        ['kladj', 'gae'], ['value', 'gae'],
+        ['gae', 'adv'],
+        ['adv', 'actor'], ['oldlp', 'actor'],
+        ['adv', 'critic'], ['value', 'critic'],
+      ],
+    };
+
+    const GRPO: Algo = {
+      callout: 'GRPO drops the critic entirely. Instead of GAE, it samples a group of N responses per prompt and uses the group\'s mean and std as the baseline. Fewer operators, no value model — significantly less compute and memory.',
+      nodes: [
+        { id: 'prompt',  label: 'prompt',         phase: 'src',   x: 360, y: 36 },
+        { id: 'rollout', label: 'rollout × N',    phase: 'gen',   x: 360, y: 110 },
+        { id: 'oldlp',   label: 'old logprob',    phase: 'prep',  x: 160, y: 210 },
+        { id: 'reflp',   label: 'ref logprob',    phase: 'prep',  x: 360, y: 210 },
+        { id: 'reward',  label: 'reward (×N)',    phase: 'prep',  x: 560, y: 210 },
+        { id: 'group',   label: 'group baseline + std', phase: 'prep', x: 560, y: 310, w: 170 },
+        { id: 'adv',     label: 'advantages',     phase: 'prep',  x: 360, y: 410 },
+        { id: 'actor',   label: 'actor update',   phase: 'train', x: 360, y: 500 },
+      ],
+      edges: [
+        ['prompt', 'rollout'],
+        ['rollout', 'oldlp'], ['rollout', 'reflp'], ['rollout', 'reward'],
+        ['reward', 'group'],
+        ['group', 'adv'],
+        ['reflp', 'adv'],
+        ['adv', 'actor'], ['oldlp', 'actor'],
+      ],
+    };
+
+    const DAPO: Algo = {
+      callout: 'DAPO is GRPO with three tweaks — dynamic sampling (filter degenerate groups), overlong reward shaping, asymmetric clipping in the actor loss. The dataflow shape is the same; the changes are local annotations on existing operators.',
+      nodes: [
+        { id: 'prompt',  label: 'prompt',                 phase: 'src',   x: 360, y: 36 },
+        { id: 'rollout', label: 'rollout × N + filter',   phase: 'gen',   x: 360, y: 110, w: 180, tip: 'Dynamic sampling: keep resampling until enough groups have non-degenerate reward variance' },
+        { id: 'oldlp',   label: 'old logprob',            phase: 'prep',  x: 160, y: 210 },
+        { id: 'reflp',   label: 'ref logprob',            phase: 'prep',  x: 360, y: 210 },
+        { id: 'reward',  label: 'reward + overlong shape', phase: 'prep', x: 560, y: 210, w: 180, tip: 'Soft length penalty inside the hard context limit' },
+        { id: 'group',   label: 'group baseline + std',   phase: 'prep',  x: 560, y: 310, w: 170 },
+        { id: 'adv',     label: 'advantages',             phase: 'prep',  x: 360, y: 410 },
+        { id: 'actor',   label: 'actor update · asym clip · token-mean', phase: 'train', x: 360, y: 500, w: 280, tip: 'cliprange_low ≠ cliprange_high; loss averaged across all response tokens equally' },
+      ],
+      edges: [
+        ['prompt', 'rollout'],
+        ['rollout', 'oldlp'], ['rollout', 'reflp'], ['rollout', 'reward'],
+        ['reward', 'group'],
+        ['group', 'adv'],
+        ['reflp', 'adv'],
+        ['adv', 'actor'], ['oldlp', 'actor'],
+      ],
+    };
+
+    const ALGOS: Record<string, Algo> = { ppo: PPO, grpo: GRPO, dapo: DAPO };
+
+    document.querySelectorAll<HTMLElement>('.dataflow-figure').forEach((fig) => {
+      const svg     = fig.querySelector<SVGSVGElement>('.dataflow-svg')!;
+      const nodesG  = fig.querySelector<SVGGElement>('[data-region="nodes"]')!;
+      const edgesG  = fig.querySelector<SVGGElement>('[data-region="edges"]')!;
+      const callout = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const tabs    = Array.from(fig.querySelectorAll<HTMLButtonElement>('.dataflow-tab'));
+      const NS = 'http://www.w3.org/2000/svg';
+
+      function render(key: string) {
+        const algo = ALGOS[key];
+        if (!algo) return;
+        const byId: Record<string, Node> = {};
+        algo.nodes.forEach((n) => (byId[n.id] = n));
+
+        // Edges first (so nodes sit on top)
+        edgesG.replaceChildren();
+        algo.edges.forEach(([from, to]) => {
+          const a = byId[from], b = byId[to];
+          if (!a || !b) return;
+          const w1 = a.w || NW, w2 = b.w || NW;
+          // start at bottom-center of source, end at top-center of target
+          const x1 = a.x, y1 = a.y + NH / 2;
+          const x2 = b.x, y2 = b.y - NH / 2 - 4;
+          // gentle curve for clarity
+          const dy = y2 - y1;
+          const mid1 = `${x1} ${y1 + dy * 0.35}`;
+          const mid2 = `${x2} ${y2 - dy * 0.35}`;
+          const path = document.createElementNS(NS, 'path');
+          path.setAttribute('d', `M ${x1} ${y1} C ${mid1}, ${mid2}, ${x2} ${y2}`);
+          path.setAttribute('class', 'df-edge');
+          path.setAttribute('marker-end', 'url(#dataflow-arrowhead)');
+          path.setAttribute('fill', 'none');
+          edgesG.appendChild(path);
+        });
+
+        // Nodes
+        nodesG.replaceChildren();
+        algo.nodes.forEach((n, i) => {
+          const w = n.w || NW;
+          const g = document.createElementNS(NS, 'g');
+          g.setAttribute('class', `df-node df-${n.phase}`);
+          g.setAttribute('transform', `translate(${n.x - w / 2} ${n.y - NH / 2})`);
+          g.style.setProperty('--df-stagger', String(i * 30));
+          if (n.tip) g.setAttribute('data-tip', n.tip);
+
+          const rect = document.createElementNS(NS, 'rect');
+          rect.setAttribute('x', '0');
+          rect.setAttribute('y', '0');
+          rect.setAttribute('width', String(w));
+          rect.setAttribute('height', String(NH));
+          rect.setAttribute('rx', '6');
+          rect.setAttribute('class', 'df-rect');
+          g.appendChild(rect);
+
+          const text = document.createElementNS(NS, 'text');
+          text.setAttribute('x', String(w / 2));
+          text.setAttribute('y', String(NH / 2));
+          text.setAttribute('class', 'df-label');
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('dominant-baseline', 'central');
+          text.textContent = n.label;
+          g.appendChild(text);
+
+          // Tooltip-like dot if there's a tip
+          if (n.tip) {
+            const dot = document.createElementNS(NS, 'circle');
+            dot.setAttribute('cx', String(w - 8));
+            dot.setAttribute('cy', '8');
+            dot.setAttribute('r', '3');
+            dot.setAttribute('class', 'df-tip-dot');
+            g.appendChild(dot);
+          }
+
+          nodesG.appendChild(g);
+        });
+
+        callout.replaceChildren();
+        const p = document.createElement('p');
+        p.textContent = algo.callout;
+        callout.appendChild(p);
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render(t.getAttribute('data-algo') || 'ppo');
+        });
+      });
+
+      render('ppo');
+    });
+  })();
+</script>
+
+<style>
+  .dataflow-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+
+  .dataflow-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+  }
+  .dataflow-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .dataflow-tab:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .dataflow-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .dataflow-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .leg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .leg::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+  .leg-src::before   { background: #8a8a8a; }
+  .leg-gen::before   { background: #d08a3e; }
+  .leg-prep::before  { background: #4a78c2; }
+  .leg-train::before { background: #6b4ab8; }
+
+  .dataflow-svg {
+    width: 100%;
+    height: auto;
+    background: var(--code-bg);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+
+  /* :global: nodes/edges are created dynamically via JS */
+  .dataflow-figure :global(.df-edge) {
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+    opacity: 0.7;
+  }
+  .dataflow-figure :global(#dataflow-arrowhead path) {
+    fill: var(--border-strong);
+  }
+  .dataflow-figure :global(.df-rect) {
+    stroke-width: 1.5;
+    transition: filter 200ms ease;
+    animation: df-pop 380ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--df-stagger) * 1ms);
+  }
+  .dataflow-figure :global(.df-label) {
+    font-size: 12px;
+    font-weight: 500;
+    pointer-events: none;
+    animation: df-fade 380ms ease-out both;
+    animation-delay: calc(var(--df-stagger) * 1ms + 100ms);
+  }
+  .dataflow-figure :global(.df-src .df-rect)   { fill: #f0eee8; stroke: #8a8a8a; }
+  .dataflow-figure :global(.df-src .df-label)  { fill: #4a4a4a; }
+  .dataflow-figure :global(.df-gen .df-rect)   { fill: #f5e0c3; stroke: #d08a3e; }
+  .dataflow-figure :global(.df-gen .df-label)  { fill: #6b4422; }
+  .dataflow-figure :global(.df-prep .df-rect)  { fill: #dde5f3; stroke: #4a78c2; }
+  .dataflow-figure :global(.df-prep .df-label) { fill: #1e3a8a; }
+  .dataflow-figure :global(.df-train .df-rect) { fill: #e3d9f3; stroke: #6b4ab8; }
+  .dataflow-figure :global(.df-train .df-label){ fill: #3d2a6b; }
+  .dataflow-figure :global(.df-tip-dot) {
+    fill: var(--accent);
+    opacity: 0.9;
+  }
+
+  @keyframes df-pop {
+    from { transform: scale(0.85); opacity: 0; transform-origin: center; }
+    to   { transform: scale(1); opacity: 1; }
+  }
+  @keyframes df-fade {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dataflow-figure :global(.df-rect),
+    .dataflow-figure :global(.df-label) {
+      animation: none;
+    }
+  }
+
+  .dataflow-callout {
+    margin-top: 0.85rem;
+    padding: 0.75rem 1rem;
+    border-left: 2px solid var(--accent);
+    background: var(--code-bg);
+    border-radius: 0 4px 4px 0;
+  }
+  .dataflow-callout p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+</style>

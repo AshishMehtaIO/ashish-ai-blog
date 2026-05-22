@@ -1,0 +1,365 @@
+---
+title: "A mental model of VERL"
+description: "How an open-source LLM RL framework actually works — single-controller orchestration, the unifying advantage estimator, multi-turn agent loops, and where it strains today."
+pubDate: 2026-05-22
+author: "Ashish"
+tags: ["verl", "rl", "llm", "rlhf"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import RLLoopAnimation from '../../components/blog/verl/RLLoopAnimation.astro';
+import DataflowGraph from '../../components/blog/verl/DataflowGraph.astro';
+import ControllerParadigms from '../../components/blog/verl/ControllerParadigms.astro';
+import ArchitectureExplorer from '../../components/blog/verl/ArchitectureExplorer.astro';
+import ReshardingViz from '../../components/blog/verl/ReshardingViz.astro';
+import DevicePlacement from '../../components/blog/verl/DevicePlacement.astro';
+import GRPOGroupSampling from '../../components/blog/verl/GRPOGroupSampling.astro';
+import AlgorithmMatrix from '../../components/blog/verl/AlgorithmMatrix.astro';
+import IterationWalkthrough from '../../components/blog/verl/IterationWalkthrough.astro';
+import MultiTurnRolloutScrubber from '../../components/blog/verl/MultiTurnRolloutScrubber.astro';
+import AsyncRolloutGantt from '../../components/blog/verl/AsyncRolloutGantt.astro';
+
+[VERL](https://github.com/verl-project/verl) is an open-source library for doing reinforcement learning on large language models. It is the engine behind a lot of recent RL-trained models, the reference implementation for [HybridFlow](https://arxiv.org/abs/2409.19256), and one of the better places to look if you want to understand how modern LLM RL training actually fits together. This post is a top-down tour.
+
+The aim is not a tutorial. The aim is a *mental model* — a picture of VERL's moving parts complete enough that, after reading, you can open the repo, find the function you care about, and reason about what would happen if you changed it. Later posts in this series will go deeper into the parts that deserve their own essay.
+
+We assume you know classical reinforcement learning at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) / [DQN](https://arxiv.org/abs/1312.5602) level, and that you have at least seen RLHF and PPO applied to language models. We do not assume you have used VERL before. Where the post leans on LLM-specific RL ideas — KL constraints to a reference model, GRPO, multi-turn rollouts — there are sidebars in the margin for readers coming from classical RL.<Sidenote id="sn-intro-margins">On wider screens these sidebars float in the right margin. On narrower screens, tap the number to expand them inline. Use them as needed — the main text stands alone without them.</Sidenote>
+
+A note on framing. Throughout, we treat VERL as a *design study* — what choices does it make, why, and what do those choices imply. We are not benchmarking it, comparing it to alternative frameworks, or recommending it. Those would each deserve their own post.
+
+## §1 — Why an LLM RL framework at all?
+
+If you have done RL in the pre-LLM world — Atari, MuJoCo, board games — you may wonder what is new. The training loop is the same: collect experience under the current policy, compute a learning signal from it, and update the policy. What changed is the scale of every term in that loop, and the constraints that scale introduces.
+
+A modern LLM has tens to hundreds of billions of parameters. A single training step holds optimizer state, gradients, activations, and several model copies in GPU memory at once.<Sidenote id="sn-model-copies">For PPO you typically need the policy, a frozen reference policy for the KL term, a critic (value model), and sometimes a reward model — four model-sized objects, plus optimizer state for the trainable ones.</Sidenote> Generating a single response from the policy means running an autoregressive decode for hundreds or thousands of tokens — an inference workload with very different performance characteristics than training. And once you start doing multi-turn rollouts (a tool-using agent, a long reasoning trace), the structure of "an episode" stops looking anything like a frame of Atari.
+
+These three pressures — model size, the training-vs-inference split, and multi-turn rollouts — shape every design choice an LLM RL framework has to make. The questions become: *who owns the GPUs at what moments?* *How do weights move from the training engine to the inference engine and back?* *What is the unit of work the controller dispatches?* *How does an algorithm change become a one-line config edit instead of a fork?*
+
+VERL's answer is a **single-controller orchestration model** sitting on top of multi-controller worker groups, with pluggable training backends (FSDP, Megatron-LM), pluggable rollout backends (vLLM, SGLang, Hugging Face), a unified data container that flows between them, and a small number of algorithmic abstractions general enough that adding a new RL algorithm (like DAPO) is mostly a config recipe rather than a new module. That sentence is dense; the rest of this post unpacks it.
+
+This is the design described in the HybridFlow paper, which reports throughput improvements of **1.53×–20.57×** over comparable systems.<Sidenote id="sn-throughput-caveat">Numbers from the paper. Real-world speedups depend enormously on model size, cluster shape, algorithm, and how much of the workload is rollout-bound versus training-bound. Treat the range as evidence the design choices are *defensible*, not as a guarantee for your setup.</Sidenote> Performance is not our focus — the mental model is. But the existence of those numbers is part of why the design is worth studying: the abstractions are not paying a heavy performance tax.
+
+### What the rest of this post covers
+
+We walk the LLM RL training loop top-to-bottom, mapping each stage to VERL. §2 builds the loop abstractly. §3 introduces VERL's architecture (workers, resource pools, the data protocol). §4 covers backends — what runs where. §5 walks the algorithm zoo and shows that PPO, GRPO, RLOO, REINFORCE++, and DAPO are all the same machinery with different advantage estimators. §6 covers reward functions and is honest about where VERL is opinionated (it is ORM-first; PRMs need work). §7 introduces the running example — a multi-turn tool-using agent on GSM8K — and covers the AgentLoop abstraction plus async rollouts. §8 lists what is new and notable in 2025/2026. §9 lists what is hard or missing. §10 is a one-paragraph mental model recap.
+
+## §2 — The LLM RL training loop, abstractly
+
+Before we look at VERL, look at the loop without it.
+
+A single RL iteration on an LLM has four phases. *Rollout*: sample a batch of prompts; for each prompt, generate one or more responses from the current policy.<Sidenote id="sn-rollout-glossary">"Rollout" is the term we will use throughout for *generating responses from the current policy*. In classical RL it means simulating a trajectory. For an LLM, a "trajectory" is the sequence of tokens the model generates (plus, in multi-turn settings, the tool/env responses interleaved with them).</Sidenote> *Reward*: score each response — by rule (does the math answer match?), by a reward model, or both. *Advantage*: turn rewards into a per-token learning signal, usually by computing an advantage estimate. *Update*: take a policy gradient step.
+
+<RLLoopAnimation />
+
+What is different from the classical RL loop you already know?
+
+**Token-level credit assignment.** In classical RL, an episode is a sequence of state-action pairs and the reward arrives over time. For an LLM, the "actions" are tokens, and the reward typically arrives once — at the end of the response — even though there can be thousands of tokens to credit. How that single scalar gets distributed over tokens is part of what makes LLM RL its own subfield.
+
+**The reference policy and the KL constraint.** You are fine-tuning a base model that already speaks the language. You do not want the policy to drift so far from that base that it stops being a useful language model. Almost every LLM RL algorithm carries a KL penalty against a frozen *reference policy* — typically the supervised-fine-tuned (SFT) starting point — either inside the reward or inside the loss.<Sidenote id="sn-kl-where">In-reward KL turns the KL term into part of the per-token reward used to compute advantages. In-loss KL adds an explicit KL penalty to the policy-gradient objective. They are not equivalent, and VERL lets you choose. We come back to this in §5.</Sidenote>
+
+**Batched off-policy rollouts.** Classical PPO does a small number of environment steps per update and stays close to on-policy. An LLM rollout step generates thousands of tokens per prompt, and a single training pass might span multiple minibatches over the same rollout. The importance-sampling correction in PPO suddenly matters more, which is why the clipping in the surrogate loss is doing real work.
+
+**The rollout engine is a different system from the training engine.** This is the structural fact that defines the rest of the post. Generating responses fast requires KV cache management, paged attention, continuous batching — the things [vLLM](https://arxiv.org/abs/2309.06180) and [SGLang](https://arxiv.org/abs/2312.07104) exist to do. Training requires sharded gradients, optimizer state, mixed precision, communication primitives — what FSDP and Megatron-LM are for. These are *different code bases* with *different memory layouts*. Moving the freshly-updated policy weights from training engine to rollout engine, every iteration, is one of the central engineering problems an LLM RL framework solves.
+
+### RL as a dataflow graph
+
+A useful reframing — the one the HybridFlow paper opens with — is to think of an RL algorithm as a *dataflow graph*: nodes are operators (rollout, reward, advantage computation, actor update), edges are tensors flowing between them. Different algorithms are different graphs over the same vocabulary of operators. PPO has a critic and a GAE node. GRPO drops both and adds a group-baseline node. DAPO is GRPO with a couple of annotated operators. The shape of the graph tells you what infrastructure has to exist; the *similarities* between graphs tell you what infrastructure can be shared.
+
+<DataflowGraph />
+
+Once you internalize this view, much of VERL's design follows. The single-controller orchestration is the thing that *executes* these graphs. The backends are the implementations of individual operators. The plug-in points are the places where the graph is parameterized.
+
+<Sidenote id="sn-rlhf-primer">**RLHF in five paragraphs, if you only know classical RL.** RLHF stands for Reinforcement Learning from Human Feedback. The setup: you have a base language model — say, the SFT version of a 7B-parameter model. You want to make it better at following instructions, being helpful, or solving math problems. You have some signal of "better" — preference comparisons, rule-based correctness checks, a learned reward model. You want to use that signal to update the policy. The pipeline: (1) sample a prompt, (2) generate a response from the current policy, (3) score the response, (4) update the policy to make high-scoring responses more likely. PPO with a KL constraint to the reference model is the workhorse. GRPO (introduced in [DeepSeekMath](https://arxiv.org/abs/2402.03300)) skips the value function entirely by sampling a group of responses per prompt and using the group mean as a baseline. Everything else in this post is variations on that theme.</Sidenote>
+
+With the loop in mind, we can now look at how VERL implements it.
+
+## §3 — Architecture: the single controller and its workers
+
+VERL's central design choice is the **single-controller pattern**. A driver process — a regular Python program — orchestrates a set of remote workers running on GPUs. The driver decides *what* should happen next ("generate a batch", "compute rewards", "do a training step"); the workers decide *how* to do it locally, using whatever internal parallelism they need.
+
+This is in contrast to a fully *multi-controller* design, where every GPU runs the same training script in lockstep (the standard PyTorch DDP / SPMD model). Multi-controller is simpler and tighter for plain training. It struggles when the workload alternates between heterogeneous phases — training, rollout, reward computation — each of which wants a different layout. VERL's hybrid: single controller across phases, multi-controller *within* a phase. This is the contribution the HybridFlow paper formalizes.
+
+<ControllerParadigms />
+
+Click through the three tabs above. The hybrid view — a thin driver coordinating multiple SPMD groups, each running its own internal parallelism — is the picture worth memorizing.
+
+<ArchitectureExplorer />
+
+### The core abstractions
+
+Five names show up everywhere in VERL. Knowing what each does is most of what you need to read the codebase.
+
+**`Worker` and `WorkerGroup`.** A *Worker* is a Ray actor specialized to a role — generating responses (rollout worker), computing log-probs and gradients for the policy (actor worker), holding the frozen reference model for KL (ref worker), computing values for PPO (critic worker), scoring with a learned reward model (reward-model worker). A *WorkerGroup* is a collection of Workers that participate together in a phase. VERL commonly *colocates* multiple roles on the same workers — the `ActorRolloutRefWorker` triad shares weights for the actor and reference and lives on the same GPUs as the rollout engine — because the alternative (keeping each role on its own GPUs) wastes memory and adds weight-transfer cost.
+
+**`ResourcePool`.** A logical grouping of GPUs that workers get scheduled onto. You can have a single pool with mode-switching (the GPUs train, then the same GPUs serve rollouts) or disaggregated pools (one set of GPUs for training, another for rollout). VERL supports both; the single-pool, mode-switching layout is the common case because GPU memory is the binding constraint.
+
+**`RayPPOTrainer`.** The top-level driver class. It owns the worker groups, runs the training loop, calls the dispatch primitives, and contains the orchestration logic. Find it at [`verl/trainer/ppo/ray_trainer.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py). Despite the name it is the orchestrator for GRPO, DAPO, RLOO, and the other algorithms too — the algorithm choice is a config.
+
+**`DataProto`.** The data container that flows between workers. It bundles a `batch` (a `TensorDict` of GPU tensors — input_ids, attention masks, logprobs, rewards, advantages), a `non_tensor_batch` (NumPy arrays for things that do not belong on the GPU), and `meta_info` (Python dict for scalar state). The same object holds the rollout output, gets augmented with rewards and advantages, and arrives at the training workers. The discipline of always wrapping batches in `DataProto` is what makes the dispatch / collect pattern composable. Find it at [`verl/protocol.py`](https://github.com/verl-project/verl/blob/main/verl/protocol.py).
+
+**Dispatch / collect.** The pattern by which the driver hands work to a `WorkerGroup`. The driver calls a method on the group; the group's decorator routes the call to all member workers, splits the `DataProto` across them, awaits results, and reassembles. From the driver's point of view it looks like a function call; underneath it is a fan-out / fan-in across Ray actors. This is where the "single controller" abstraction earns its keep — the orchestration code reads like ordinary Python.
+
+<Sidenote id="sn-ray-spmd">**Ray, SPMD, MPMD — a one-paragraph primer.** [Ray](https://ray.io) is a Python framework for distributed actors. An actor is a class instance that lives on a remote machine; you call methods on it like ordinary Python, and Ray handles the RPC. *SPMD* (Single Program, Multiple Data) is the model where every process runs the same script and differs only in its rank — classic PyTorch DDP. *MPMD* (Multiple Program, Multiple Data) is the model where different processes run different code — e.g., a Ray application with one driver and several actor classes. VERL is MPMD at the top level (driver + heterogeneous worker classes) and SPMD inside each worker group (FSDP or Megatron over its GPUs).</Sidenote>
+
+### Why this matters for reading the code
+
+Once you internalize the dispatch / collect pattern, the trainer file (`ray_trainer.py`) reads almost like sequential pseudocode: *generate a batch, compute log-probs, score it, compute advantages, do an actor update, do a critic update.* All the distributed machinery is hidden behind worker-group method calls. That readability is a deliberate consequence of the single-controller choice. It is also why adding a new algorithm — DAPO is the canonical example — usually does not require rewriting the trainer. You change which advantage estimator runs and which loss aggregation mode you use. Everything else is the same.
+
+## §4 — Backends: where the compute actually happens
+
+A Worker is an interface. The thing that does work is a *backend* — a concrete training engine (FSDP, Megatron-LM) or rollout engine (vLLM, SGLang, Hugging Face) attached to that worker. VERL is pluggable here on purpose. Different backends are right for different model sizes, cluster shapes, and generation patterns.
+
+### Training backends
+
+**[FSDP](https://pytorch.org/docs/stable/fsdp.html) (Fully Sharded Data Parallel)** shards model parameters, gradients, and optimizer state across the GPUs in a data-parallel group. At each forward / backward step it all-gathers the parameters it needs and frees them after. It is conceptually simple, lives entirely in PyTorch, and works well up to moderate scale (single-node, modest multi-node).
+
+**[Megatron-LM](https://github.com/NVIDIA/Megatron-LM)** combines tensor parallelism (split a layer's matmul across GPUs), pipeline parallelism (split layers across GPUs), and data parallelism. The math is hairier and the integration is heavier, but for very large models or very large clusters Megatron's communication pattern wins.
+
+Heuristic for choosing: if you can fit your model in FSDP and your cluster is not enormous, use FSDP. If your model needs TP to fit or your cluster is large enough that TP+PP+DP starts beating DP-only on communication, use Megatron.
+
+### Rollout backends
+
+**[vLLM](https://github.com/vllm-project/vllm)** is the default. Paged KV cache, continuous batching, broad model support, mature. For most workloads it is the right choice.
+
+**[SGLang](https://github.com/sgl-project/sglang)** is a newer alternative with [RadixAttention](https://arxiv.org/abs/2312.07104) for prefix sharing, first-class structured generation, native async server APIs, and FP8 support in recent versions. Worth reaching for when you have a lot of prefix reuse (a long system prompt, multi-turn conversations), when you need constrained decoding, or when you want async generation.
+
+**Hugging Face** generation is supported as a fallback for prototyping. It does not scale to serious training; use it to debug a new model on one GPU and then switch.
+
+### The 3D-HybridEngine: parameter resharding
+
+The hardest engineering problem in LLM RL is keeping the training engine and the rollout engine in sync. After every training step the policy weights change, and the rollout engine has to pick up those changes before it generates the next batch.
+
+The naive answer — save a checkpoint, load it on the other side — is far too slow. VERL's answer is **direct GPU-to-GPU weight streaming** via NCCL or HCCL (the *3D-HybridEngine*, named for its handling of TP, PP, and DP layouts on both sides of the transfer). The training engine, which holds weights in one sharded layout, broadcasts to the rollout engine, which expects them in a different layout, and the resharding happens in-flight. The paper reports throughput around 8 GB/s on H100+InfiniBand and 16.5 GB/s on Ascend hardware. The practical effect is that the time spent moving weights between phases shrinks from minutes to single-digit seconds for typical model sizes.
+
+<ReshardingViz />
+
+Walk through the four phases. The same physical GPUs cycle between a training layout (each GPU holds one shard of the full model) and a rollout layout (pairs of GPUs hold tensor-parallel slices that the rollout engine expects). The resharding is the gather-and-rebroadcast in between.
+
+### Single pool with mode switching, or disaggregated pools
+
+If your training and rollout engines share GPUs, you alternate: train, then drop the training context, load rollout weights, generate, drop the rollout context, reload training, repeat. The 3D-HybridEngine makes the drop-and-reload fast. This is the default layout and the one most users want — GPU memory is precious, and idle GPUs during a phase are a bigger problem than the overhead of switching.
+
+If you have GPUs to spare, you can disaggregate: dedicate a set to training, a set to rollout. The transfer pattern is now inter-pool instead of in-place. This is what unlocks *async rollout* (§7), where the rollout pool can be generating the next batch while the training pool is still training on the current one.
+
+<DevicePlacement />
+
+There is no universally best layout — the three meters under each option are the tradeoff you are making. Colocated wins on memory and inter-pool traffic; standalone wins on concurrency; split is a middle ground. For most users at most scales, VERL's default colocated layout is the right starting point.
+
+<Sidenote id="sn-sharding-primer">**Parameter sharding (TP / PP / DP) in one page.** *Data parallelism (DP)* replicates the model across GPUs and splits the batch — easy, but requires the model to fit on one GPU. *Tensor parallelism (TP)* splits each layer's matrices across GPUs — say, eight GPUs each holding 1/8 of the hidden dimension — and adds an all-reduce after the matmul. *Pipeline parallelism (PP)* splits *layers* across GPUs — GPU 0 holds layers 0–7, GPU 1 holds layers 8–15, etc. — and runs micro-batches in a pipeline so all GPUs stay busy. Real systems combine all three: TP within a node, PP across nodes, DP across replicas. FSDP is a refinement of DP that also shards parameters (not just data) to fit larger models with simpler code than full TP+PP.</Sidenote>
+
+## §5 — Algorithms, unified
+
+Here is the claim that most surprised me reading the codebase. **PPO, GRPO, RLOO, REINFORCE++, and DAPO are all the same machinery with different advantage estimators.** The rollout is the same. The KL handling is the same (and orthogonally configurable). The optimizer is the same. The trainer loop is the same. What differs is one config key — `algorithm.adv_estimator` — that selects which function in [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) gets called to turn rewards into advantages.
+
+This is not an accident. It is the consequence of identifying the *right level of abstraction*: the loss surgery, the KL choice, the clipping mode are parameters; the only place algorithms genuinely differ in code is how they compute the advantage signal.
+
+<GRPOGroupSampling />
+
+### The advantage estimator pattern
+
+The `algorithm.adv_estimator` config switches between estimators. Each is a function with the same shape: take token-level rewards and (optionally) values, return per-token advantages and returns. The driver calls whichever one the config selects after rewards are computed and before the actor update.
+
+### PPO
+
+Standard [PPO](https://arxiv.org/abs/1707.06347) with [Generalized Advantage Estimation](https://arxiv.org/abs/1506.02438). You need a value function (the critic), and GAE turns the per-token reward signal plus value estimates into an advantage:
+
+$$
+\hat A_t = \sum_{l=0}^{T-t-1} (\gamma \lambda)^l \, \delta_{t+l}, \qquad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
+$$
+
+The actor minimizes the clipped surrogate:
+
+$$
+\mathcal{L}^{\text{actor}} = -\mathbb{E}_t\!\left[\min\!\big(\rho_t \hat A_t, \ \text{clip}(\rho_t, 1-\epsilon, 1+\epsilon)\, \hat A_t\big)\right], \quad \rho_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}
+$$
+
+VERL supports *dual clipping* — separate `cliprange_low` and `cliprange_high` — for asymmetric control, which DAPO uses heavily.
+
+### GRPO
+
+[GRPO](https://arxiv.org/abs/2402.03300) (Group Relative Policy Optimization) is the critic-free alternative. For each prompt, you sample a *group* of $N$ responses, compute their rewards, and use the group as its own baseline:
+
+$$
+\hat A_i = \frac{r_i - \text{mean}(r_1, \ldots, r_N)}{\text{std}(r_1, \ldots, r_N)}
+$$
+
+No value function, no GAE, no critic — just the group statistics. The same advantage is broadcast to every token of the response (with a response mask zeroing out the prompt). For tasks where a clean per-prompt reward exists (math problems, code, anything with a verifier), GRPO often matches PPO at a fraction of the implementation complexity and compute.
+
+### RLOO
+
+[RLOO](https://arxiv.org/abs/2402.14740) (REINFORCE Leave-One-Out) is also critic-free. For a group of $N$ responses, the baseline for response $i$ is the mean of the *other* $N-1$:
+
+$$
+\hat A_i = r_i - \frac{1}{N-1} \sum_{j \neq i} r_j
+$$
+
+This is REINFORCE with a low-variance baseline. It is older than GRPO, simpler, and surprisingly competitive.
+
+### REINFORCE++
+
+[REINFORCE++](https://arxiv.org/abs/2501.03262) is pure policy gradient with an optional global baseline and various stabilization tricks. The minimal version is:
+
+$$
+\hat A_t = r_t - b
+$$
+
+where $b$ is a running scalar baseline. The framework treats it the same as the others — a particular advantage function.
+
+### DAPO
+
+[DAPO](https://arxiv.org/abs/2503.14476) is the most interesting case for understanding VERL's design. It is a GRPO variant with three tweaks: *decoupled clipping* (asymmetric `cliprange_low` and `cliprange_high`), *dynamic sampling* (filter out groups where all rewards are the same — they contribute no learning signal), and *token-level loss aggregation* (average the loss across all response tokens equally, rather than averaging per-sequence and then across sequences). It also adds *overlong reward shaping*: a soft length penalty inside the hard context limit.
+
+What is striking from a framework-design perspective: **DAPO required no new abstractions**. The clipping config already had separate low/high knobs. The reward computation already supported shaping. The dynamic sampling slots into the rollout loop. Loss aggregation was already a config (`loss_agg_mode: token-mean`). Adding DAPO to VERL is, almost literally, a recipe.
+
+### KL handling, orthogonally
+
+KL constraint to the reference model is configurable independently of the advantage estimator:
+
+- `algorithm.use_kl_in_reward: true` — the per-token KL between policy and reference is subtracted from the per-token reward before advantage computation. The KL gets credit-assigned by the same machinery as the task reward.
+- `algorithm.use_kl_in_reward: false` + KL in loss — the KL term is added to the actor loss directly, with its own coefficient.
+
+These are mathematically distinct: in-reward KL is part of the advantage signal and propagates through whatever credit assignment you use; in-loss KL is an external regularizer. The choice matters more than it looks like it should.
+
+VERL supports several KL penalty forms — forward KL, the [low-variance estimator](http://joschu.net/blog/kl-approx.html), MSE, full — and an adaptive controller that targets a KL value rather than fixing the coefficient.
+
+<Sidenote id="sn-loss-agg">**Token-level vs sequence-level loss aggregation.** If a batch has 16 responses of lengths 200, 200, 200, … and one of length 4,000, *sequence-level* aggregation (average within each sequence, then average across sequences) gives that long response 1/16 of the gradient signal. *Token-level* aggregation (sum all losses, divide by total token count) gives it 4000/(15·200 + 4000) ≈ 57%. For long-form reasoning, token-level is usually what you want, because long correct answers should contribute proportionally. DAPO defaults to token-level for exactly this reason.</Sidenote>
+
+### The unifying view
+
+The reason this section is long is that it is, in some sense, all VERL is. The architecture, the backends, the multi-turn rollouts — all of that exists to make this picture run efficiently at scale. The picture itself is: *generate, score, turn scores into advantages, take a gradient step.* VERL's contribution is not a new algorithm. It is the observation that the algorithms differ in *one place*, the discipline to make that one place a clean abstraction, and the engineering to make the rest of the system pluggable around it.
+
+<AlgorithmMatrix />
+
+### One iteration, end to end
+
+Up to this point we have looked at VERL component-by-component. The view that ties everything together is a single training iteration, stepped through with the actual worker methods, config knobs, and tensor shapes labeled at every stage. Pick an algorithm and walk through it — slowly, or hit play.
+
+<IterationWalkthrough />
+
+A few things worth pointing out from the walkthrough. The same forward pass through the policy model gets called *three* times per iteration in PPO (rollout, old logprob, new logprob) — each in a different mode, with a different batch shape, controlled by a different config knob. The training inner loop is where ppo_epochs × mini_batch_size × micro_batch_size interact: total optimizer steps = epochs × (rollout_batch / mini_batch), and the gradient accumulation inside each step is implicit from the micro vs mini ratio. And the rule that "DAPO is GRPO with three tweaks" becomes visible: the stage list is the same, only the *generate*, *score*, and *actor loss* nodes change.
+
+## §6 — Reward functions: where the signal comes from
+
+The reward function turns a generated response into a learning signal. In VERL it is the most user-facing surface — almost everyone customizes it.
+
+### The composition pipeline
+
+A single training iteration assembles its reward signal in stages, all stacked into a single `token_level_scores` tensor that flows into the advantage estimator:
+
+1. **Model-based reward** (optional). If you configured a reward-model worker, the response is scored by a learned model. VERL supports discriminative reward models (classifier-style, one scalar per response) and generative reward models (an LLM that produces a critique and a score). An HTTP router pattern keeps the reward model serving decoupled from the trainer.
+
+2. **Rule-based reward** (almost always present). A Python function you write that scores the response programmatically. The canonical signature:
+
+```python
+async def compute_score(data_source, solution_str, ground_truth, extra_info) -> dict:
+    # return {"score": float, "extra_info": {...}}
+```
+
+For math, this is a string-extraction-and-comparison routine. For code, it might run unit tests in a sandbox. For format checks, a regex. You point VERL at your function via a config; the [`RewardManager`](https://github.com/verl-project/verl/blob/main/verl/workers/reward_manager) handles batching and async scheduling.
+
+3. **KL adjustment** (if `use_kl_in_reward`). The token-level KL between policy and reference is subtracted from the reward.
+
+4. The combined result lands in `batch.batch['token_level_scores']`, which the advantage estimator from §5 consumes.
+
+### PRM versus ORM, honestly
+
+A reward signal can be an **outcome reward model (ORM)** — one scalar at the end of the response, judging the final answer — or a **process reward model (PRM)** — a sequence of scores, one per reasoning step, judging the process. PRMs sound nicer: dense credit assignment, step-by-step feedback, fewer wasted tokens. In practice they are much harder to build (you need step-level labels, or a step-level reward model, or both) and contribute their own variance and reward-hacking failure modes.
+
+**VERL ships ORM-first.** Almost every example, recipe, and integration assumes a single scalar reward placed at the end of the response. The token-level reward tensor *exists* — `token_level_scores` has a value at every position — but the convention is "zero everywhere, reward at end." For ORM-style training, this is fine.
+
+For PRMs, the path exists but it is do-it-yourself. Nothing prevents you from populating `token_level_scores` with per-step rewards: write a custom reward function that takes the response, segments it into reasoning steps, scores each step (with rules or with a step-level reward model), and returns a tensor with rewards at the right token positions. Your downstream advantage estimator picks those up like any other dense reward signal.
+
+What VERL does not give you, today, is a first-class PRM abstraction: a way to declare "this is a PRM, here is its model, here is how to segment responses, here is how to handle credit." Building that — and the matching examples — is open work.
+
+### Composite rewards
+
+Most production reward functions are composites: correctness + format + length, or correctness + a "did the model think for at least N tokens" check, or correctness with penalties for specific failure modes. You implement this by combining signals inside your `compute_score` function. There is nothing fancy in the framework — it is your function, you return your scalar. The shape of the framework's interface is well-designed for this: scalars compose by addition, your function is plain Python, the reward manager handles batching.
+
+<Sidenote id="sn-dense-not-free">**Dense rewards are not free.** A common mistake is to add shaping rewards (style, length, intermediate goals) expecting it to help, only to discover the policy learns to maximize the shaping signal at the expense of the actual goal. The classic AI-safety failure mode (reward hacking) is most acute precisely where the reward is densest. Sparse but accurate rewards — *did the test suite pass, did the math answer match* — often beat dense but proxy rewards. When you do shape, weight the shaping terms small and watch the rollout distribution change.</Sidenote>
+
+## §7 — Multi-turn rollouts and the AgentLoop
+
+Now the running example earns its keep. The setup: you want to train a model to solve [GSM8K](https://arxiv.org/abs/2110.14168) math problems by using a calculator tool. On each problem the agent can think, call a calculator, observe the result, think more, call again, and finally answer. The reward is whether the final answer matches the ground truth.
+
+This is the canonical multi-turn tool-using agent. VERL ships an example for it ([`gsm8k_tool_agent_loop.py`](https://github.com/verl-project/verl/blob/main/examples/data_preprocess/gsm8k_tool_agent_loop.py)). It exercises every multi-turn feature in the framework.
+
+<MultiTurnRolloutScrubber />
+
+### AgentLoop
+
+VERL's multi-turn machinery lives in [`verl/experimental/agent_loop/`](https://github.com/verl-project/verl/tree/main/verl/experimental/agent_loop) (the *experimental* path is a hint about stability; we come back to this in §9). The central abstraction is `AgentLoop` — a coroutine-based framework for stepping an agent through a multi-turn interaction.
+
+The state across turns is held in an `AgentData` object: the message history, the running token sequence, the response mask (more on this in a moment), per-turn log-probs, the turn counter, and modality-specific buffers for images / audio / video if relevant. Each turn the agent generates, the framework checks whether a tool was called, executes any tool calls, appends the results to the message history, and continues until the agent emits a final answer or a turn limit is hit.
+
+### The response_mask trick
+
+The cleanest piece of design in the multi-turn machinery is the **response_mask**. Every token in the final assembled trajectory is tagged: 1 if it was generated by the LLM (i.e., it is an action the policy took), 0 if it came from a tool or environment (it is observation). The loss only credits / penalizes positions where the mask is 1. Tool outputs are part of the context the model conditioned on, but they are not part of what the policy is being trained to produce.
+
+This trick is what lets the multi-turn case stay inside the same loss machinery as single-turn. The advantage estimator sees a token sequence and a per-token reward; it does not need to know about turns or tools. The mask handles the bookkeeping. Once you see it, everything else slots into place.
+
+### Tools: the `@function_tool` decorator
+
+You define a tool as a Python function. The `@function_tool` decorator inspects the signature and Google-style docstring, generates an OpenAI-compatible tool schema automatically, and registers it for use inside `AgentLoop`:
+
+```python
+@function_tool
+async def calculator(expression: str) -> ToolResponse:
+    """Evaluate a mathematical expression.
+
+    Args:
+        expression: A Python arithmetic expression, e.g. "2 + 2 * 3".
+    """
+    return ToolResponse(text=str(eval(expression)))
+```
+
+Under the hood is `BaseTool`, with a four-method lifecycle: `create` (per-instance setup), `execute` (run the call), `calc_reward` (optional per-tool reward signal), `release` (teardown). `ToolResponse` can carry text, images, or video — the multi-modal content flows back into the message history for the next agent turn.
+
+### Async rollout: the recent leap
+
+The classical PPO-style training loop is *synchronous*: generate the whole batch, then train on it. For LLM RL this is wasteful — generation is GPU-bound but not in the same way training is, and one side or the other is idle for most of the iteration.
+
+**One-step-off async** ([`verl/experimental/one_step_off_policy/`](https://github.com/verl-project/verl/tree/main/verl/experimental/one_step_off_policy/)) overlaps the two by tolerating exactly one step of staleness: while the rollout engine generates batch $t+1$, the training engine updates on batch $t$. After both finish, the new weights are transferred, and the cycle continues. The policy that generated batch $t+1$ is one step behind the policy that just got the update — small enough that the importance-sampling correction handles the drift, large enough that overlap is real. Reported throughput gains are 20–40% over fully synchronous, with training quality preserved.
+
+**Fully async** ([`verl/experimental/fully_async_policy/`](https://github.com/verl-project/verl/tree/main/verl/experimental/fully_async_policy/)) goes further: generation can be preempted and resumed mid-rollout, making the staleness more variable but the GPU utilization higher. This is the regime modern large-scale RL trainers operate in.
+
+<AsyncRolloutGantt />
+
+The wall-clock gain in async modes is exactly the overlap between the two lanes. Sync wastes one lane while the other works. One-step-off keeps both busy and bounds the staleness to a single step. Fully async maximizes overlap at the cost of variable staleness.
+
+<Sidenote id="sn-react">**ReAct, in 60 seconds.** [ReAct](https://arxiv.org/abs/2210.03629) is the pattern where an LLM agent alternates *reasoning* (a thought) and *acting* (a tool call), conditioning each reasoning step on the previous tool outputs. VERL's `AgentLoop` is general — it does not enforce ReAct — but ReAct is the most common shape for what gets built on top.</Sidenote>
+
+## §8 — What is new and notable
+
+A non-exhaustive list of recent additions worth knowing about, all of which we have touched on:
+
+- **DAPO as a recipe.** The most interesting thing about DAPO landing in VERL is what it did not require: no new abstractions, no trainer rewrite, no new module. The framework's existing knobs were already general enough. The configuration pattern this validates is the headline.
+
+- **AgentLoop as first-class multi-turn.** Multi-turn agent rollouts are no longer a special case glued onto a single-turn framework — they are an abstraction with its own state object, lifecycle, and tool integration. This is what lets the GSM8K-with-calculator example be short.
+
+- **Async rollout.** One-step-off and fully async modes turn what used to be sequential phases into overlapping ones. For long-running training, the wall-clock gains compound.
+
+- **SGLang as an alternative rollout backend.** Better prefix caching, native async server, structured generation, FP8 in recent versions. When your workload has long shared prefixes — which multi-turn agents always do — SGLang's RadixAttention is a meaningful win.
+
+## §9 — Limitations and open questions
+
+Honest list, with no editorializing.
+
+- **No first-class PRM machinery.** Token-level rewards exist; PRM as a declared abstraction does not. Open work for the community.
+
+- **`AgentLoop` is in `experimental/`.** It works and there are examples, but the location is a hint: the API can move. Code against it with the awareness that you may need to update.
+
+- **Multi-node FSDP ↔ rollout resharding maturity.** Single-node works smoothly; multi-node has more sharp edges. Worth verifying for your specific cluster shape before committing.
+
+- **LoRA + parameter resharding nuances.** Adapter merging during resharding is supported but is a place where edge cases live. If your training mode involves LoRA, plan to read the resharding code.
+
+- **Megatron integration depth.** Can you change TP degree on the fly? Mostly no. Plan your topology up front rather than expecting to adjust mid-run.
+
+- **Single-controller bottleneck at extreme scale.** At very large scale the driver itself becomes a coordination point. We have not hit this in practice; the HybridFlow paper claims the design holds; it is a thing to watch.
+
+- **Multi-modal RL is nascent.** Vision-language RL works in VERL, but the abstractions and examples are thinner than the text-only ones. We did not cover it in this post for that reason.
+
+## §10 — A mental model recap
+
+VERL is a **single-controller orchestrator** over **multi-controller worker groups**, with pluggable training and rollout backends and a unified data protocol (`DataProto`) flowing between them. The training loop — rollout, reward, advantage, update — lives in one driver class (`RayPPOTrainer`). The algorithm choice (PPO, GRPO, RLOO, REINFORCE++, DAPO) is one config key selecting an advantage estimator; everything else is the same machinery. Reward functions are user-supplied Python with a clean composition pipeline; the framework is ORM-first today, with PRM as an extension surface rather than a built-in. Multi-turn agent rollouts are first-class via `AgentLoop`, with a `response_mask` trick that keeps the loss machinery simple. Recent additions — DAPO as a recipe, async rollout, SGLang — are best read as evidence the abstractions are holding their shape under real demands.
+
+The next posts in this series will go deep on the pieces that deserve their own essay: the algorithm zoo, the multi-turn / agentic stack, and what scaling really looks like. For now, you have enough of a mental model to open the repo and start reading.

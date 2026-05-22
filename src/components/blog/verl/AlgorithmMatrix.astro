@@ -1,0 +1,327 @@
+---
+// Viz 10 — Algorithm comparison matrix. Rows are algorithms, columns are
+// design dimensions (critic, baseline type, KL placement, clipping, loss).
+// Hover any cell for the explanation. Visual indicators instead of plain text.
+---
+
+<figure class="algo-matrix" aria-label="RL algorithm comparison matrix">
+  <div class="algo-grid" role="table">
+    <!-- Header row -->
+    <div class="algo-head" role="row">
+      <div class="algo-cell algo-cell-rowhead">Algorithm</div>
+      <div class="algo-cell">
+        <span class="head-title">Critic</span>
+        <span class="head-sub">(value model)</span>
+      </div>
+      <div class="algo-cell">
+        <span class="head-title">Baseline</span>
+        <span class="head-sub">for advantage</span>
+      </div>
+      <div class="algo-cell">
+        <span class="head-title">KL</span>
+        <span class="head-sub">placement</span>
+      </div>
+      <div class="algo-cell">
+        <span class="head-title">Clipping</span>
+        <span class="head-sub">in actor loss</span>
+      </div>
+      <div class="algo-cell">
+        <span class="head-title">Loss agg</span>
+        <span class="head-sub">aggregation mode</span>
+      </div>
+    </div>
+
+    <!-- PPO -->
+    <div class="algo-row" role="row">
+      <div class="algo-cell algo-cell-rowhead">
+        <strong>PPO</strong>
+        <span class="row-sub">Schulman 2017</span>
+      </div>
+      <div class="algo-cell" data-tip="A separate value network is trained alongside the policy to estimate V(s_t).">
+        <span class="badge badge-yes">yes</span>
+      </div>
+      <div class="algo-cell" data-tip="Generalized Advantage Estimation: combines TD residuals across timesteps.">
+        <span class="badge badge-gae">GAE</span>
+      </div>
+      <div class="algo-cell" data-tip="KL penalty can sit in the reward (per-token subtraction) or the loss — VERL lets you choose.">
+        <span class="badge badge-neutral">in-reward or in-loss</span>
+      </div>
+      <div class="algo-cell" data-tip="Standard PPO clip with a single epsilon (typically 0.2).">
+        <span class="badge badge-symclip">symmetric ε</span>
+      </div>
+      <div class="algo-cell" data-tip="Average loss per sequence, then average across sequences.">
+        <span class="badge badge-seq">sequence-mean</span>
+      </div>
+    </div>
+
+    <!-- GRPO -->
+    <div class="algo-row" role="row">
+      <div class="algo-cell algo-cell-rowhead">
+        <strong>GRPO</strong>
+        <span class="row-sub">DeepSeekMath 2024</span>
+      </div>
+      <div class="algo-cell" data-tip="No critic — saves significant compute and memory at the cost of needing group samples.">
+        <span class="badge badge-no">no</span>
+      </div>
+      <div class="algo-cell" data-tip="For each prompt, sample N responses; the group mean is the baseline and the group std normalizes the scale.">
+        <span class="badge badge-group">group mean / std</span>
+      </div>
+      <div class="algo-cell" data-tip="Same orthogonal choice as PPO — KL term is configurable separately from the advantage estimator.">
+        <span class="badge badge-neutral">in-reward or in-loss</span>
+      </div>
+      <div class="algo-cell" data-tip="Standard symmetric clip; nothing special.">
+        <span class="badge badge-symclip">symmetric ε</span>
+      </div>
+      <div class="algo-cell" data-tip="Same default as PPO.">
+        <span class="badge badge-seq">sequence-mean</span>
+      </div>
+    </div>
+
+    <!-- RLOO -->
+    <div class="algo-row" role="row">
+      <div class="algo-cell algo-cell-rowhead">
+        <strong>RLOO</strong>
+        <span class="row-sub">Ahmadian 2024</span>
+      </div>
+      <div class="algo-cell" data-tip="No critic — like GRPO.">
+        <span class="badge badge-no">no</span>
+      </div>
+      <div class="algo-cell" data-tip="REINFORCE with a leave-one-out baseline: for response i, the baseline is the mean of the OTHER N-1 responses in the group.">
+        <span class="badge badge-group">leave-one-out</span>
+      </div>
+      <div class="algo-cell" data-tip="Often run without explicit KL — the leave-one-out baseline does heavy variance reduction on its own.">
+        <span class="badge badge-neutral">optional</span>
+      </div>
+      <div class="algo-cell" data-tip="Pure REINFORCE — no clipping; the IS ratio is dropped.">
+        <span class="badge badge-noclip">none</span>
+      </div>
+      <div class="algo-cell" data-tip="Sequence-level by default but configurable.">
+        <span class="badge badge-seq">sequence-mean</span>
+      </div>
+    </div>
+
+    <!-- REINFORCE++ -->
+    <div class="algo-row" role="row">
+      <div class="algo-cell algo-cell-rowhead">
+        <strong>REINFORCE++</strong>
+        <span class="row-sub">Hu 2025</span>
+      </div>
+      <div class="algo-cell" data-tip="Optional running baseline scalar; not a model.">
+        <span class="badge badge-no">no</span>
+      </div>
+      <div class="algo-cell" data-tip="A single running scalar baseline (or none) — much simpler than GAE or group statistics.">
+        <span class="badge badge-baseline">running scalar</span>
+      </div>
+      <div class="algo-cell" data-tip="Configurable, same machinery as the others.">
+        <span class="badge badge-neutral">optional</span>
+      </div>
+      <div class="algo-cell" data-tip="Variant supports the PPO clip for stability.">
+        <span class="badge badge-symclip">symmetric ε (opt)</span>
+      </div>
+      <div class="algo-cell" data-tip="Token-level loss aggregation is the common configuration.">
+        <span class="badge badge-tok">token-mean</span>
+      </div>
+    </div>
+
+    <!-- DAPO -->
+    <div class="algo-row" role="row">
+      <div class="algo-cell algo-cell-rowhead">
+        <strong>DAPO</strong>
+        <span class="row-sub">Liu 2025</span>
+      </div>
+      <div class="algo-cell" data-tip="GRPO-style: no critic.">
+        <span class="badge badge-no">no</span>
+      </div>
+      <div class="algo-cell" data-tip="Group mean/std baseline, like GRPO. Adds dynamic sampling: keep resampling until enough groups have non-degenerate reward variance.">
+        <span class="badge badge-group">group + dyn sample</span>
+      </div>
+      <div class="algo-cell" data-tip="KL placement is configurable; the recipe doesn't change this from GRPO.">
+        <span class="badge badge-neutral">in-reward or in-loss</span>
+      </div>
+      <div class="algo-cell" data-tip="The headline change: cliprange_low and cliprange_high are independent, giving asymmetric control over the IS ratio.">
+        <span class="badge badge-asymclip">asymmetric low/high</span>
+      </div>
+      <div class="algo-cell" data-tip="Token-level loss aggregation is the recipe default — long correct responses contribute proportionally rather than getting diluted.">
+        <span class="badge badge-tok">token-mean</span>
+      </div>
+    </div>
+  </div>
+
+  <p class="algo-matrix-hint">
+    Hover or tap a cell to see the explanation. The unifying picture: <strong>VERL's machinery is the
+    same across the row</strong>; algorithms differ in a handful of design knobs.
+  </p>
+
+  <figcaption>
+    Five RL algorithms across five design dimensions. The pattern that pops out: most cells differ
+    only in choice, not in code path. VERL's <code>algorithm.adv_estimator</code> picks the
+    baseline; KL, clipping, and loss aggregation are independent knobs on the same training loop.
+  </figcaption>
+</figure>
+
+<style>
+  .algo-matrix {
+    margin: 2.5rem auto;
+    max-width: 940px;
+  }
+  .algo-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1.4fr 1.5fr 1.5fr 1.3fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+  }
+  .algo-head,
+  .algo-row {
+    display: contents;
+  }
+  .algo-cell {
+    background: var(--bg-elevated);
+    padding: 0.7rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    cursor: default;
+    transition: background 120ms ease;
+  }
+  .algo-head .algo-cell {
+    background: var(--code-bg);
+    padding: 0.85rem 0.6rem;
+    border-bottom: 1px solid var(--border-strong);
+    font-weight: 600;
+  }
+  .algo-row .algo-cell[data-tip] {
+    cursor: help;
+    position: relative;
+  }
+  .algo-row .algo-cell:hover {
+    background: var(--code-bg);
+  }
+  .algo-cell-rowhead {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .algo-cell-rowhead strong {
+    color: var(--text);
+    font-family: var(--font-serif);
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .row-sub {
+    color: var(--text-faint);
+    font-size: 0.7rem;
+    margin-top: 0.15rem;
+    font-family: var(--font-mono);
+  }
+  .head-title {
+    color: var(--text);
+    font-size: 0.85rem;
+  }
+  .head-sub {
+    color: var(--text-faint);
+    font-size: 0.7rem;
+    margin-top: 0.15rem;
+    font-weight: 400;
+  }
+
+  /* Badge styles for each value type */
+  .badge {
+    display: inline-block;
+    padding: 0.25rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+  }
+  .badge-yes      { background: #dde5f3; color: #1e3a8a; border-color: #4a78c2; }
+  .badge-no       { background: var(--code-bg); color: var(--text-muted); border-color: var(--border-strong); }
+  .badge-gae      { background: #e3d9f3; color: #3d2a6b; border-color: #6b4ab8; }
+  .badge-group    { background: #dde5f3; color: #1e3a8a; border-color: #4a78c2; }
+  .badge-baseline { background: #f0eee8; color: #4a4a4a; border-color: #8a8a8a; }
+  .badge-neutral  { background: var(--bg); color: var(--text-muted); }
+  .badge-symclip  { background: #f5e0c3; color: #6b4422; border-color: #d08a3e; }
+  .badge-asymclip { background: #f5d0d0; color: #6b2222; border-color: #b85c5c; }
+  .badge-noclip   { background: var(--code-bg); color: var(--text-faint); }
+  .badge-seq      { background: #e3d9f3; color: #3d2a6b; border-color: #6b4ab8; }
+  .badge-tok      { background: #d8ecd1; color: #2d5523; border-color: #4a8a3d; }
+
+  /* Tooltip on hover */
+  .algo-row .algo-cell[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 240px;
+    padding: 0.55rem 0.7rem;
+    background: var(--text);
+    color: var(--bg);
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    font-weight: 400;
+    line-height: 1.4;
+    border-radius: 4px;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 150ms ease;
+    z-index: 10;
+    text-align: left;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+  .algo-row .algo-cell[data-tip]:hover::after {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .algo-matrix-hint {
+    margin: 0.85rem 0 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  /* Mobile: collapse to a stacked card view */
+  @media (max-width: 720px) {
+    .algo-grid {
+      grid-template-columns: 1fr;
+    }
+    .algo-head { display: none; }
+    .algo-row {
+      display: block;
+      background: var(--bg-elevated);
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .algo-row .algo-cell {
+      background: transparent;
+      padding: 0.35rem 0;
+      flex-direction: row;
+      gap: 0.6rem;
+      align-items: center;
+      text-align: left;
+      justify-content: flex-start;
+    }
+    .algo-row .algo-cell:not(.algo-cell-rowhead)::before {
+      content: attr(data-col);
+      color: var(--text-faint);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      min-width: 90px;
+    }
+    .algo-row .algo-cell[data-tip]::after { display: none; }
+  }
+</style>

@@ -1,0 +1,426 @@
+---
+// Viz 4 — Multi-turn rollout scrubber. Step through a GSM8K math + calculator
+// rollout: agent turn → tool call → tool response → next turn → final reward.
+// The token strip shows response_mask coloring (LLM tokens vs tool output).
+//
+// Pattern: hand-authored markup + per-figure script, vanilla JS.
+---
+
+<figure class="rollout-figure" aria-label="Multi-turn rollout scrubber">
+  <header class="rollout-header">
+    <div class="rollout-title">
+      <h4>Multi-turn rollout — GSM8K with a calculator</h4>
+      <p class="rollout-step-label" data-readout="label">Step 1 / 7 — Prompt</p>
+    </div>
+    <div class="rollout-reward" data-state="pending">
+      Reward <span data-readout="reward">—</span>
+    </div>
+  </header>
+
+  <div class="rollout-body">
+    <div class="transcript" data-region="transcript" aria-live="polite"></div>
+
+    <div class="token-strip">
+      <svg viewBox="0 0 400 36" class="token-svg" preserveAspectRatio="none">
+        <g data-region="tokens"></g>
+      </svg>
+      <div class="token-legend">
+        <span class="dot user"></span>user
+        <span class="dot llm"></span>LLM (response_mask = 1)
+        <span class="dot tool"></span>tool output (response_mask = 0)
+      </div>
+    </div>
+  </div>
+
+  <div class="rollout-controls">
+    <button type="button" class="ctrl-btn" data-control="prev" aria-label="Previous step">←</button>
+    <input
+      type="range"
+      min="0"
+      max="6"
+      step="1"
+      value="0"
+      class="ctrl-range"
+      data-control="step"
+      aria-label="Rollout step"
+    />
+    <button type="button" class="ctrl-btn" data-control="next" aria-label="Next step">→</button>
+    <button type="button" class="ctrl-btn ctrl-play" data-control="play" aria-label="Play">Play</button>
+  </div>
+
+  <figcaption>
+    A single multi-turn rollout from VERL's GSM8K calculator-agent example. Drag the scrubber, or
+    hit play, to step through how the trajectory accumulates: agent thought, tool call, tool
+    response, next agent turn, final answer, reward. The bar at the bottom is the full token
+    sequence; the colored segments are what the policy is trained on (LLM tokens, mask = 1)
+    versus what it merely conditions on (tool output, mask = 0).
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Role = 'user' | 'llm' | 'tool' | 'final';
+    type Message = { role: Role; text: string };
+    type TokenSpan = { role: Role; n: number };
+
+    // The running example: a GSM8K-style math problem solved across multiple turns
+    // by an agent that calls a calculator tool. Token counts are rough — what matters
+    // is the proportions and the response_mask coloring.
+    const PROBLEM =
+      'Maria has 24 apples. She gives one third to her brother, then eats 2 herself. How many does she have left?';
+
+    const FULL_MESSAGES: Message[] = [
+      { role: 'user',  text: PROBLEM },
+      { role: 'llm',   text: 'Let me work through this. First, one third of 24 is calculator(24 / 3) →' },
+      { role: 'tool',  text: '8' },
+      { role: 'llm',   text: 'So she gives 8 apples to her brother. After eating 2 more, she has calculator(24 - 8 - 2) →' },
+      { role: 'tool',  text: '14' },
+      { role: 'final', text: 'Maria has 14 apples left.' },
+    ];
+
+    // Token spans cumulatively — each step reveals one more chunk.
+    const SPANS: TokenSpan[] = [
+      { role: 'user',  n: 22 }, // step 0: just the prompt
+      { role: 'llm',   n: 26 }, // step 1: assistant turn 1
+      { role: 'tool',  n: 2  }, // step 2: tool response 1
+      { role: 'llm',   n: 30 }, // step 3: assistant turn 2
+      { role: 'tool',  n: 2  }, // step 4: tool response 2
+      { role: 'final', n: 10 }, // step 5: final answer
+      // step 6: reward applied (no new tokens)
+    ];
+
+    const STEP_LABELS = [
+      'Prompt — only the user message exists',
+      'Agent turn 1 — model thinks, emits calculator(24/3)',
+      'Tool response 1 — calculator returns 8',
+      'Agent turn 2 — model continues, emits calculator(24−8−2)',
+      'Tool response 2 — calculator returns 14',
+      'Agent turn 3 — final answer',
+      'Reward — outcome reward placed at sequence end',
+    ];
+
+    document.querySelectorAll<HTMLElement>('.rollout-figure').forEach((fig) => {
+      const transcript = fig.querySelector<HTMLElement>('[data-region="transcript"]')!;
+      const tokensG    = fig.querySelector<SVGGElement>('[data-region="tokens"]')!;
+      const labelEl    = fig.querySelector<HTMLElement>('[data-readout="label"]')!;
+      const rewardEl   = fig.querySelector<HTMLElement>('[data-readout="reward"]')!;
+      const rewardBar  = fig.querySelector<HTMLElement>('.rollout-reward')!;
+      const range      = fig.querySelector<HTMLInputElement>('[data-control="step"]')!;
+      const prev       = fig.querySelector<HTMLButtonElement>('[data-control="prev"]')!;
+      const next       = fig.querySelector<HTMLButtonElement>('[data-control="next"]')!;
+      const play       = fig.querySelector<HTMLButtonElement>('[data-control="play"]')!;
+
+      const TOTAL_STEPS = 7;
+      let step = 0;
+      let timer: number | null = null;
+
+      function renderTokens(currentStep: number) {
+        const visibleSpans = SPANS.slice(0, Math.min(currentStep + 1, SPANS.length));
+        const totalTokens = visibleSpans.reduce((a, s) => a + s.n, 0) || 1;
+        const W = 400, H = 26;
+        const NS = 'http://www.w3.org/2000/svg';
+        tokensG.replaceChildren();
+
+        let x = 0;
+        visibleSpans.forEach((span) => {
+          const w = (span.n / totalTokens) * W;
+          // background rect
+          const r = document.createElementNS(NS, 'rect');
+          r.setAttribute('x', String(x));
+          r.setAttribute('y', '4');
+          r.setAttribute('width', String(Math.max(0.5, w - 1)));
+          r.setAttribute('height', String(H));
+          r.setAttribute('class', `tok tok-${span.role}`);
+          tokensG.appendChild(r);
+          x += w;
+        });
+
+        // If reward step, append a small marker
+        if (currentStep === TOTAL_STEPS - 1) {
+          const marker = document.createElementNS(NS, 'circle');
+          marker.setAttribute('cx', String(Math.min(W - 4, x - 4)));
+          marker.setAttribute('cy', '17');
+          marker.setAttribute('r', '4');
+          marker.setAttribute('class', 'reward-marker');
+          tokensG.appendChild(marker);
+        }
+      }
+
+      function renderTranscript(currentStep: number) {
+        // Show messages 0..currentStep (capped at the message array length).
+        const upto = Math.min(currentStep, FULL_MESSAGES.length - 1);
+        transcript.replaceChildren();
+        for (let i = 0; i <= upto; i++) {
+          const m = FULL_MESSAGES[i];
+          const row = document.createElement('div');
+          row.className = `msg msg-${m.role}${i === upto && currentStep < TOTAL_STEPS - 1 ? ' msg-current' : ''}`;
+          const label = document.createElement('div');
+          label.className = 'msg-role';
+          label.textContent =
+            m.role === 'user' ? 'user'
+            : m.role === 'tool' ? 'tool'
+            : m.role === 'final' ? 'agent · final'
+            : 'agent';
+          const body = document.createElement('div');
+          body.className = 'msg-body';
+          body.textContent = m.text;
+          row.appendChild(label);
+          row.appendChild(body);
+          transcript.appendChild(row);
+        }
+
+        // Scroll the newest message into view (within the transcript scroll region).
+        const last = transcript.lastElementChild as HTMLElement | null;
+        if (last && transcript.scrollTo) {
+          transcript.scrollTo({ top: last.offsetTop - 8, behavior: 'smooth' });
+        }
+      }
+
+      function render() {
+        labelEl.textContent = `Step ${step + 1} / ${TOTAL_STEPS} — ${STEP_LABELS[step]}`;
+        renderTranscript(step);
+        renderTokens(step);
+        range.value = String(step);
+        if (step === TOTAL_STEPS - 1) {
+          rewardBar.dataset.state = 'applied';
+          rewardEl.textContent = '+1.0';
+        } else {
+          rewardBar.dataset.state = 'pending';
+          rewardEl.textContent = '—';
+        }
+        prev.disabled = step === 0;
+        next.disabled = step === TOTAL_STEPS - 1;
+      }
+
+      function setStep(s: number) {
+        step = Math.max(0, Math.min(TOTAL_STEPS - 1, s));
+        render();
+      }
+
+      function stopPlay() {
+        if (timer !== null) {
+          window.clearInterval(timer);
+          timer = null;
+        }
+        play.textContent = 'Play';
+        play.dataset.state = 'idle';
+      }
+      function startPlay() {
+        stopPlay();
+        play.textContent = 'Pause';
+        play.dataset.state = 'playing';
+        if (step >= TOTAL_STEPS - 1) setStep(0);
+        timer = window.setInterval(() => {
+          if (step >= TOTAL_STEPS - 1) {
+            stopPlay();
+            return;
+          }
+          setStep(step + 1);
+        }, 1300);
+      }
+
+      prev.addEventListener('click', () => { stopPlay(); setStep(step - 1); });
+      next.addEventListener('click', () => { stopPlay(); setStep(step + 1); });
+      range.addEventListener('input', () => { stopPlay(); setStep(parseInt(range.value, 10)); });
+      play.addEventListener('click', () => {
+        if (play.dataset.state === 'playing') stopPlay();
+        else startPlay();
+      });
+
+      // Pause if scrolled away or tab hidden
+      const io = new IntersectionObserver(
+        (entries) => entries.forEach((e) => { if (!e.isIntersecting) stopPlay(); }),
+        { threshold: 0.1 }
+      );
+      io.observe(fig);
+      document.addEventListener('visibilitychange', () => { if (document.hidden) stopPlay(); });
+
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .rollout-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-elevated);
+  }
+
+  .rollout-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1.1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--code-bg);
+  }
+  .rollout-title h4 {
+    margin: 0;
+    font-family: var(--font-serif);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .rollout-step-label {
+    margin: 0.15rem 0 0;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  .rollout-reward {
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    transition: all 250ms ease;
+  }
+  .rollout-reward[data-state="applied"] {
+    color: white;
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .rollout-reward span {
+    margin-left: 0.35rem;
+    font-family: var(--font-mono);
+  }
+
+  .rollout-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+    gap: 1.25rem;
+    padding: 1rem 1.1rem;
+  }
+  @media (max-width: 720px) {
+    .rollout-body { grid-template-columns: 1fr; }
+  }
+
+  .transcript {
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    padding: 0.25rem;
+    scroll-behavior: smooth;
+  }
+  /* :global(): transcript messages are created dynamically via JS. */
+  .rollout-figure :global(.msg) {
+    border-left: 2px solid var(--border-strong);
+    padding: 0.1rem 0 0.1rem 0.65rem;
+    transition: border-color 220ms ease, background 220ms ease;
+  }
+  .rollout-figure :global(.msg.msg-current) {
+    border-left-color: var(--accent);
+  }
+  .rollout-figure :global(.msg-role) {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.1rem;
+  }
+  .rollout-figure :global(.msg-body) {
+    color: var(--text);
+  }
+  .rollout-figure :global(.msg-user .msg-body)  { color: var(--text-muted); }
+  .rollout-figure :global(.msg-tool .msg-body)  { font-family: var(--font-mono); color: var(--text-muted); }
+  .rollout-figure :global(.msg-final .msg-body) { font-weight: 600; }
+
+  .token-strip {
+    align-self: start;
+  }
+  .token-svg {
+    width: 100%;
+    height: 36px;
+    display: block;
+    background: var(--code-bg);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  /* :global(): tok rects and reward marker are created dynamically via JS. */
+  .rollout-figure :global(.tok) {
+    transition: fill 200ms ease;
+  }
+  .rollout-figure :global(.tok-user)  { fill: var(--text-faint); opacity: 0.55; }
+  .rollout-figure :global(.tok-llm)   { fill: var(--accent); }
+  .rollout-figure :global(.tok-tool)  { fill: var(--text-muted); opacity: 0.45; }
+  .rollout-figure :global(.tok-final) { fill: var(--accent); opacity: 0.95; }
+  .rollout-figure :global(.reward-marker) {
+    fill: var(--text);
+    stroke: var(--bg-elevated);
+    stroke-width: 1.5;
+  }
+  .token-legend {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    align-items: center;
+  }
+  .token-legend .dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 0.35rem;
+    vertical-align: middle;
+  }
+  .token-legend .dot.user { background: var(--text-faint); opacity: 0.55; }
+  .token-legend .dot.llm  { background: var(--accent); }
+  .token-legend .dot.tool { background: var(--text-muted); opacity: 0.45; }
+
+  .rollout-controls {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 0.6rem;
+    align-items: center;
+    padding: 0.7rem 1.1rem 0.9rem;
+    border-top: 1px solid var(--border);
+  }
+  .ctrl-btn {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.35rem 0.7rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    min-width: 2.25rem;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .ctrl-btn:hover:not(:disabled) {
+    background: var(--code-bg);
+    border-color: var(--accent);
+  }
+  .ctrl-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .ctrl-play[data-state="playing"] {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .ctrl-range {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+</style>

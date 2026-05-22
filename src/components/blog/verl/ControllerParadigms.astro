@@ -1,0 +1,416 @@
+---
+// Viz 6 — Single / Multi / Hybrid controller paradigm comparison.
+// Three tabs animate the architecture switch. Mirrors the comparison shown
+// in Pathways / HybridFlow.
+---
+
+<figure class="ctrl-figure" aria-label="Controller paradigm comparison">
+  <div class="ctrl-tabs" role="tablist">
+    <button type="button" role="tab" class="ctrl-tab" data-paradigm="multi"  aria-selected="false">Multi-controller (SPMD)</button>
+    <button type="button" role="tab" class="ctrl-tab" data-paradigm="single" aria-selected="false">Single-controller (MPMD)</button>
+    <button type="button" role="tab" class="ctrl-tab active" data-paradigm="hybrid" aria-selected="true">Hybrid (VERL)</button>
+  </div>
+
+  <svg viewBox="0 0 720 360" class="ctrl-svg" role="img" preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <marker id="ctrl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+    <g data-region="diagram"></g>
+  </svg>
+
+  <div class="ctrl-explain">
+    <div class="ctrl-pros-cons">
+      <div class="ctrl-col" data-col="pros">
+        <h5>Strengths</h5>
+        <ul data-region="pros"></ul>
+      </div>
+      <div class="ctrl-col" data-col="cons">
+        <h5>Weaknesses</h5>
+        <ul data-region="cons"></ul>
+      </div>
+    </div>
+    <p class="ctrl-caption" data-region="caption"></p>
+  </div>
+
+  <figcaption>
+    Three programming-model paradigms for distributed RL. The hybrid model — a single driver
+    orchestrating multiple SPMD worker groups — is what VERL adopts. It is the contribution
+    HybridFlow formalizes.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Paradigm = 'multi' | 'single' | 'hybrid';
+
+    type Spec = {
+      title: string;
+      caption: string;
+      pros: string[];
+      cons: string[];
+      render: (g: SVGGElement) => void;
+    };
+
+    const NS = 'http://www.w3.org/2000/svg';
+
+    function el(tag: string, attrs: Record<string, string | number>, parent?: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+
+    function workerBox(g: SVGGElement, x: number, y: number, w: number, h: number, label: string, role: string, klass = 'cw-worker') {
+      const wrap = el('g', { class: klass, transform: `translate(${x} ${y})` }, g) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 6, class: 'cw-rect' }, wrap);
+      el('text', { x: w / 2, y: 18, class: 'cw-label', 'text-anchor': 'middle' }, wrap).textContent = label;
+      el('text', { x: w / 2, y: 34, class: 'cw-sub',   'text-anchor': 'middle' }, wrap).textContent = role;
+      return wrap;
+    }
+
+    function controllerBox(g: SVGGElement, x: number, y: number, w: number, h: number, label: string) {
+      const wrap = el('g', { class: 'cw-controller', transform: `translate(${x} ${y})` }, g) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 6, class: 'cw-ctrl-rect' }, wrap);
+      el('text', { x: w / 2, y: h / 2 + 5, class: 'cw-ctrl-label', 'text-anchor': 'middle' }, wrap).textContent = label;
+      return wrap;
+    }
+
+    function edge(g: SVGGElement, x1: number, y1: number, x2: number, y2: number, dashed = false) {
+      const p = el('path', {
+        d: `M ${x1} ${y1} L ${x2} ${y2}`,
+        class: dashed ? 'cw-edge cw-edge-dashed' : 'cw-edge',
+        fill: 'none',
+        'marker-end': 'url(#ctrl-arrow)',
+      }, g);
+      return p;
+    }
+
+    const SPECS: Record<Paradigm, Spec> = {
+      multi: {
+        title: 'Multi-controller (SPMD)',
+        caption: 'Every GPU runs the same program; they coordinate through collective primitives (all-reduce, broadcast). This is what PyTorch DDP does. Fast and simple for plain training, but awkward when the workload alternates between heterogeneous phases.',
+        pros: [
+          'Lowest control-plane overhead',
+          'Maps cleanly to collectives (NCCL, MPI)',
+          'Battle-tested at scale (DeepSpeed, Megatron)',
+        ],
+        cons: [
+          'All workers run identical code → hard to mix roles',
+          'Algorithm changes require touching every rank',
+          'Heterogeneous phases (train vs rollout) are clunky',
+        ],
+        render: (g) => {
+          // 6 identical worker tiles, peer collective lines between them
+          const tiles = 6;
+          const tw = 90, th = 60;
+          const gap = 14;
+          const startX = (720 - (tiles * tw + (tiles - 1) * gap)) / 2;
+          const y = 150;
+          for (let i = 0; i < tiles; i++) {
+            const x = startX + i * (tw + gap);
+            workerBox(g, x, y, tw, th, `worker ${i}`, 'same script', 'cw-worker cw-worker-peer');
+          }
+          // Horizontal collective bar above and below
+          el('text', { x: 360, y: 80, class: 'cw-section-label', 'text-anchor': 'middle' }, g).textContent = 'all GPUs run the same SPMD program';
+          el('line', { x1: startX + tw / 2, y1: 110, x2: startX + (tiles - 1) * (tw + gap) + tw / 2, y2: 110, class: 'cw-bus' }, g);
+          el('text', { x: 360, y: 102, class: 'cw-sub', 'text-anchor': 'middle' }, g).textContent = 'collective ops (all-reduce, broadcast)';
+          el('line', { x1: startX + tw / 2, y1: 240, x2: startX + (tiles - 1) * (tw + gap) + tw / 2, y2: 240, class: 'cw-bus' }, g);
+          el('text', { x: 360, y: 268, class: 'cw-sub', 'text-anchor': 'middle' }, g).textContent = 'peer-to-peer transfers';
+          // Mini lines from each tile to the bus
+          for (let i = 0; i < tiles; i++) {
+            const x = startX + i * (tw + gap) + tw / 2;
+            el('line', { x1: x, y1: 110, x2: x, y2: 150, class: 'cw-tap' }, g);
+            el('line', { x1: x, y1: 210, x2: x, y2: 240, class: 'cw-tap' }, g);
+          }
+        },
+      },
+      single: {
+        title: 'Single-controller (MPMD)',
+        caption: 'A driver process owns the orchestration logic and dispatches work to heterogeneous workers. Workers can specialize — actor, critic, reward model. Easy to add new operators; the price is dispatch-call latency that fights you at extreme scale.',
+        pros: [
+          'Workers can specialize by role',
+          'Algorithm changes live in the driver, not the workers',
+          'Orchestration reads like ordinary sequential code',
+        ],
+        cons: [
+          'Driver dispatch is a coordination point',
+          'Per-operator call latency at large scale',
+          'Naive implementations underuse GPUs in heterogeneous phases',
+        ],
+        render: (g) => {
+          controllerBox(g, 280, 30, 160, 50, 'driver (controller)');
+          // 4 heterogeneous workers
+          const roles = [
+            { label: 'rollout',  sub: 'vLLM',    cls: 'cw-worker-rollout' },
+            { label: 'actor',    sub: 'FSDP',    cls: 'cw-worker-actor' },
+            { label: 'critic',   sub: 'FSDP',    cls: 'cw-worker-critic' },
+            { label: 'reward',   sub: 'HTTP',    cls: 'cw-worker-rm' },
+          ];
+          const tw = 130, th = 60, gap = 16;
+          const startX = (720 - (roles.length * tw + (roles.length - 1) * gap)) / 2;
+          const y = 230;
+          roles.forEach((r, i) => {
+            const x = startX + i * (tw + gap);
+            workerBox(g, x, y, tw, th, r.label, r.sub, `cw-worker ${r.cls}`);
+            // edge from driver to worker
+            edge(g, 360, 80, x + tw / 2, y - 4);
+          });
+          el('text', { x: 360, y: 320, class: 'cw-sub', 'text-anchor': 'middle' }, g).textContent =
+            'driver dispatches work; workers run different code';
+        },
+      },
+      hybrid: {
+        title: 'Hybrid (single + multi controller)',
+        caption: 'VERL\'s approach. A single driver orchestrates multiple worker GROUPS — each group is itself an SPMD cluster running its own local parallelism. The driver hands out work units; each group handles the distributed compute internally. You get MPMD\'s flexibility at the top and SPMD\'s efficiency inside.',
+        pros: [
+          'Single-controller orchestration ergonomics',
+          'Multi-controller efficiency inside each group',
+          'Adding an algorithm = changing one config + (sometimes) one operator',
+        ],
+        cons: [
+          'Two layers to reason about (driver + group)',
+          'Resharding cost between layouts is real',
+          'Driver still a coordination point — but a thinner one',
+        ],
+        render: (g) => {
+          controllerBox(g, 280, 24, 160, 48, 'driver');
+          // 3 worker GROUPS, each a small cluster of N GPUs
+          const groups = [
+            { label: 'ActorRolloutRef group',  sub: 'FSDP × 8 + vLLM',  n: 4, cls: 'cw-worker-actor' },
+            { label: 'Critic group',           sub: 'FSDP × 4',         n: 3, cls: 'cw-worker-critic' },
+            { label: 'Reward group',           sub: 'HTTP service',     n: 2, cls: 'cw-worker-rm' },
+          ];
+          const gW = 200, gH = 130, gap = 16;
+          const startX = (720 - (groups.length * gW + (groups.length - 1) * gap)) / 2;
+          const y = 180;
+          groups.forEach((grp, gi) => {
+            const x = startX + gi * (gW + gap);
+            // group container
+            const wrap = el('g', { class: 'cw-group', transform: `translate(${x} ${y})` }, g) as SVGGElement;
+            el('rect', { x: 0, y: 0, width: gW, height: gH, rx: 8, class: 'cw-group-rect' }, wrap);
+            el('text', { x: gW / 2, y: 18, class: 'cw-group-label', 'text-anchor': 'middle' }, wrap).textContent = grp.label;
+            el('text', { x: gW / 2, y: 34, class: 'cw-sub',          'text-anchor': 'middle' }, wrap).textContent = grp.sub;
+            // GPU tiles inside
+            const tw = 32, th = 32;
+            const innerGap = 8;
+            const innerStartX = (gW - (grp.n * tw + (grp.n - 1) * innerGap)) / 2;
+            const innerY = 60;
+            for (let i = 0; i < grp.n; i++) {
+              const ix = innerStartX + i * (tw + innerGap);
+              el('rect', { x: ix, y: innerY, width: tw, height: th, rx: 4, class: `cw-gpu ${grp.cls}` }, wrap);
+              el('text', { x: ix + tw / 2, y: innerY + 20, class: 'cw-gpu-label', 'text-anchor': 'middle' }, wrap).textContent = 'GPU';
+            }
+            // collective bar at the bottom showing SPMD
+            el('line', { x1: 16, y1: 116, x2: gW - 16, y2: 116, class: 'cw-bus-mini' }, wrap);
+            el('text', { x: gW / 2, y: 112, class: 'cw-tiny-label', 'text-anchor': 'middle' }, wrap).textContent = 'SPMD inside';
+            // edge from driver to group
+            edge(g, 360, 72, x + gW / 2, y - 4);
+          });
+        },
+      },
+    };
+
+    document.querySelectorAll<HTMLElement>('.ctrl-figure').forEach((fig) => {
+      const diagram = fig.querySelector<SVGGElement>('[data-region="diagram"]')!;
+      const prosUl  = fig.querySelector<HTMLUListElement>('[data-region="pros"]')!;
+      const consUl  = fig.querySelector<HTMLUListElement>('[data-region="cons"]')!;
+      const caption = fig.querySelector<HTMLElement>('[data-region="caption"]')!;
+      const tabs    = Array.from(fig.querySelectorAll<HTMLButtonElement>('.ctrl-tab'));
+
+      function show(key: Paradigm) {
+        const spec = SPECS[key];
+        diagram.replaceChildren();
+        spec.render(diagram);
+        prosUl.replaceChildren();
+        consUl.replaceChildren();
+        spec.pros.forEach((t) => {
+          const li = document.createElement('li');
+          li.textContent = t;
+          prosUl.appendChild(li);
+        });
+        spec.cons.forEach((t) => {
+          const li = document.createElement('li');
+          li.textContent = t;
+          consUl.appendChild(li);
+        });
+        caption.textContent = spec.caption;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show((t.getAttribute('data-paradigm') || 'hybrid') as Paradigm);
+        });
+      });
+
+      show('hybrid');
+    });
+  })();
+</script>
+
+<style>
+  .ctrl-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+  .ctrl-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .ctrl-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.9rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .ctrl-tab:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .ctrl-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .ctrl-svg {
+    width: 100%;
+    height: auto;
+    background: var(--code-bg);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+
+  /* :global: created via JS */
+  .ctrl-figure :global(.cw-rect),
+  .ctrl-figure :global(.cw-ctrl-rect),
+  .ctrl-figure :global(.cw-group-rect),
+  .ctrl-figure :global(.cw-gpu) {
+    stroke-width: 1.4;
+    transition: all 200ms ease;
+  }
+  .ctrl-figure :global(.cw-rect) {
+    fill: var(--bg-elevated);
+    stroke: var(--border-strong);
+  }
+  .ctrl-figure :global(.cw-worker-peer .cw-rect) { fill: var(--bg-elevated); stroke: var(--border-strong); }
+  .ctrl-figure :global(.cw-worker-rollout .cw-rect) { fill: #f5e0c3; stroke: #d08a3e; }
+  .ctrl-figure :global(.cw-worker-actor   .cw-rect) { fill: #dde5f3; stroke: #4a78c2; }
+  .ctrl-figure :global(.cw-worker-critic  .cw-rect) { fill: #e3d9f3; stroke: #6b4ab8; }
+  .ctrl-figure :global(.cw-worker-rm      .cw-rect) { fill: #d8ecd1; stroke: #4a8a3d; }
+
+  .ctrl-figure :global(.cw-ctrl-rect) {
+    fill: var(--accent);
+    stroke: var(--accent);
+  }
+  .ctrl-figure :global(.cw-ctrl-label) {
+    fill: var(--bg);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .ctrl-figure :global(.cw-label) { fill: var(--text); font-size: 13px; font-weight: 600; }
+  .ctrl-figure :global(.cw-sub)   { fill: var(--text-muted); font-size: 11px; }
+  .ctrl-figure :global(.cw-tiny-label) { fill: var(--text-faint); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; }
+  .ctrl-figure :global(.cw-section-label) { fill: var(--text-faint); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+
+  .ctrl-figure :global(.cw-edge) {
+    stroke: var(--border-strong);
+    stroke-width: 1.3;
+    opacity: 0.65;
+  }
+  .ctrl-figure :global(.cw-edge-dashed) { stroke-dasharray: 4 4; }
+  .ctrl-figure :global(#ctrl-arrow path) { fill: var(--border-strong); }
+
+  .ctrl-figure :global(.cw-bus) {
+    stroke: var(--text-faint);
+    stroke-width: 1.5;
+  }
+  .ctrl-figure :global(.cw-bus-mini) {
+    stroke: var(--text-faint);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    opacity: 0.7;
+  }
+  .ctrl-figure :global(.cw-tap) {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.6;
+  }
+
+  .ctrl-figure :global(.cw-group-rect) {
+    fill: transparent;
+    stroke: var(--border);
+    stroke-width: 1;
+    stroke-dasharray: 5 5;
+  }
+  .ctrl-figure :global(.cw-group-label) {
+    fill: var(--text);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .ctrl-figure :global(.cw-gpu-label) {
+    fill: var(--text-muted);
+    font-size: 8.5px;
+    pointer-events: none;
+  }
+
+  .ctrl-explain {
+    margin-top: 1rem;
+    padding: 1rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elevated);
+  }
+  .ctrl-pros-cons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+  }
+  @media (max-width: 640px) {
+    .ctrl-pros-cons { grid-template-columns: 1fr; }
+  }
+  .ctrl-col h5 {
+    margin: 0 0 0.4rem;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .ctrl-col[data-col="pros"] h5 { color: #4a8a3d; }
+  .ctrl-col[data-col="cons"] h5 { color: #b85c5c; }
+  .ctrl-col ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-family: var(--font-sans);
+    font-size: 0.84rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .ctrl-col li { margin-bottom: 0.25rem; }
+  .ctrl-caption {
+    margin: 0.9rem 0 0;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+</style>

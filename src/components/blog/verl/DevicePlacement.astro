@@ -1,0 +1,354 @@
+---
+// Viz 8 — Device placement explorer. Toggle between three GPU-pool layouts:
+// fully colocated, split, and standalone. Models (actor / rollout / ref /
+// critic / RM) sit on the GPUs, with badges showing where they live.
+//
+// Mirrors Figures 3 and 12 of the HybridFlow paper.
+---
+
+<figure class="dev-figure" aria-label="GPU model-placement explorer">
+  <div class="dev-tabs" role="tablist">
+    <button type="button" role="tab" class="dev-tab active" data-mode="colocate"   aria-selected="true">Colocated</button>
+    <button type="button" role="tab" class="dev-tab"        data-mode="split"      aria-selected="false">Split</button>
+    <button type="button" role="tab" class="dev-tab"        data-mode="standalone" aria-selected="false">Standalone</button>
+  </div>
+
+  <svg viewBox="0 0 720 300" class="dev-svg" role="img" preserveAspectRatio="xMidYMid meet">
+    <g data-region="gpus"></g>
+  </svg>
+
+  <div class="dev-callout">
+    <p data-region="callout"></p>
+    <div class="dev-stats">
+      <div class="dev-stat" data-stat="memory">
+        <span class="dev-stat-label">memory pressure</span>
+        <div class="dev-meter"><div class="dev-meter-fill" data-fill="memory"></div></div>
+      </div>
+      <div class="dev-stat" data-stat="concurrency">
+        <span class="dev-stat-label">concurrency</span>
+        <div class="dev-meter"><div class="dev-meter-fill" data-fill="concurrency"></div></div>
+      </div>
+      <div class="dev-stat" data-stat="comm">
+        <span class="dev-stat-label">inter-pool comm</span>
+        <div class="dev-meter"><div class="dev-meter-fill" data-fill="comm"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <figcaption>
+    Where each model lives on the GPU pool. <em>Colocated</em> shares everything on one pool
+    and time-multiplexes phases. <em>Split</em> partitions models into a couple of pools.
+    <em>Standalone</em> gives each model its own GPUs. There is no free lunch — each layout
+    trades memory pressure, concurrency, and inter-pool communication differently.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Mode = 'colocate' | 'split' | 'standalone';
+
+    type Slot = { model: 'actor' | 'rollout' | 'ref' | 'critic' | 'rm'; pool: number };
+    type Layout = {
+      title: string;
+      pools: number;
+      callout: string;
+      meters: { memory: number; concurrency: number; comm: number };
+      // assign 8 GPUs → list of (models, pool) for each GPU
+      gpus: Slot[][];
+    };
+
+    const LAYOUTS: Record<Mode, Layout> = {
+      colocate: {
+        title: 'Colocated',
+        pools: 1,
+        callout: 'All five model roles share the same eight GPUs. Memory pressure is highest because every model has to fit. But there is no inter-pool transfer, and phase transitions are just engine swaps on the same hardware. This is VERL\'s default and what most users start with.',
+        meters: { memory: 95, concurrency: 25, comm: 5 },
+        gpus: Array.from({ length: 8 }, () => ([
+          { model: 'actor',   pool: 0 },
+          { model: 'rollout', pool: 0 },
+          { model: 'ref',     pool: 0 },
+          { model: 'critic',  pool: 0 },
+          { model: 'rm',      pool: 0 },
+        ])),
+      },
+      split: {
+        title: 'Split',
+        pools: 2,
+        callout: 'Two pools. Actor / rollout / ref share one pool (they need to be near each other for fast weight transfer and KL); critic and reward model get the other. Memory pressure drops in each pool; some inter-pool transfer appears.',
+        meters: { memory: 65, concurrency: 55, comm: 40 },
+        gpus: [
+          // pool 0: actor/rollout/ref
+          ...Array.from({ length: 4 }, () => ([
+            { model: 'actor',   pool: 0 } as Slot,
+            { model: 'rollout', pool: 0 } as Slot,
+            { model: 'ref',     pool: 0 } as Slot,
+          ])),
+          // pool 1: critic + rm
+          ...Array.from({ length: 4 }, () => ([
+            { model: 'critic', pool: 1 } as Slot,
+            { model: 'rm',     pool: 1 } as Slot,
+          ])),
+        ],
+      },
+      standalone: {
+        title: 'Standalone',
+        pools: 5,
+        callout: 'Every model on its own GPUs. Memory pressure is lowest — each pool only holds one model. But inter-pool communication and orchestration explode; weight transfer between actor and rollout becomes a network roundtrip. Only worth it for very large models where colocation can\'t fit.',
+        meters: { memory: 25, concurrency: 90, comm: 90 },
+        gpus: [
+          [{ model: 'actor',   pool: 0 }],
+          [{ model: 'actor',   pool: 0 }],
+          [{ model: 'rollout', pool: 1 }],
+          [{ model: 'rollout', pool: 1 }],
+          [{ model: 'ref',     pool: 2 }],
+          [{ model: 'critic',  pool: 3 }],
+          [{ model: 'critic',  pool: 3 }],
+          [{ model: 'rm',      pool: 4 }],
+        ],
+      },
+    };
+
+    const MODEL_INFO: Record<Slot['model'], { label: string; cls: string }> = {
+      actor:   { label: 'actor',   cls: 'dev-m-actor' },
+      rollout: { label: 'rollout', cls: 'dev-m-rollout' },
+      ref:     { label: 'ref',     cls: 'dev-m-ref' },
+      critic:  { label: 'critic',  cls: 'dev-m-critic' },
+      rm:      { label: 'RM',      cls: 'dev-m-rm' },
+    };
+
+    const NS = 'http://www.w3.org/2000/svg';
+
+    function el(tag: string, attrs: Record<string, string | number>, parent?: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+
+    document.querySelectorAll<HTMLElement>('.dev-figure').forEach((fig) => {
+      const gpusG = fig.querySelector<SVGGElement>('[data-region="gpus"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const memFill = fig.querySelector<HTMLElement>('[data-fill="memory"]')!;
+      const conFill = fig.querySelector<HTMLElement>('[data-fill="concurrency"]')!;
+      const comFill = fig.querySelector<HTMLElement>('[data-fill="comm"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.dev-tab'));
+
+      // GPU grid: 4 cols x 2 rows
+      const COLS = 4, ROWS = 2;
+      const TW = 130, TH = 95;
+      const HGAP = 18, VGAP = 22;
+      const GRID_W = COLS * TW + (COLS - 1) * HGAP;
+      const GRID_H = ROWS * TH + (ROWS - 1) * VGAP;
+      const ORIGIN_X = (720 - GRID_W) / 2;
+      const ORIGIN_Y = 30;
+
+      function render(mode: Mode) {
+        const layout = LAYOUTS[mode];
+        gpusG.replaceChildren();
+
+        for (let i = 0; i < 8; i++) {
+          const c = i % COLS, r = Math.floor(i / COLS);
+          const x = ORIGIN_X + c * (TW + HGAP);
+          const y = ORIGIN_Y + r * (TH + VGAP);
+          const wrap = el('g', { class: 'dev-gpu', transform: `translate(${x} ${y})` }, gpusG) as SVGGElement;
+          el('rect', { x: 0, y: 0, width: TW, height: TH, rx: 6, class: 'dev-gpu-rect' }, wrap);
+          el('text', { x: 8, y: 14, class: 'dev-gpu-label' }, wrap).textContent = `GPU ${i}`;
+          // Show pool tag if there is more than one pool
+          if (layout.pools > 1) {
+            const slot = layout.gpus[i][0];
+            el('text', { x: TW - 8, y: 14, class: 'dev-pool-tag', 'text-anchor': 'end' }, wrap).textContent = `pool ${slot.pool}`;
+          }
+          // Model badges
+          const slots = layout.gpus[i] || [];
+          slots.forEach((s, si) => {
+            const info = MODEL_INFO[s.model];
+            const badgeW = (TW - 16) / Math.max(1, slots.length) - 4;
+            const badgeX = 8 + si * (badgeW + 4);
+            const badgeY = 28;
+            const badge = el('g', { class: `dev-badge ${info.cls}`, transform: `translate(${badgeX} ${badgeY})` }, wrap) as SVGGElement;
+            el('rect', { x: 0, y: 0, width: badgeW, height: TH - 36, rx: 3, class: 'dev-badge-rect' }, badge);
+            el('text', { x: badgeW / 2, y: (TH - 36) / 2 + 4, class: 'dev-badge-label', 'text-anchor': 'middle' }, badge).textContent = info.label;
+          });
+        }
+
+        // Pool outlines (dashed) — only when more than 1 pool
+        if (layout.pools > 1) {
+          // group GPUs by pool, draw a bounding rect
+          const poolGpus: Record<number, number[]> = {};
+          for (let i = 0; i < 8; i++) {
+            const p = layout.gpus[i][0].pool;
+            (poolGpus[p] = poolGpus[p] || []).push(i);
+          }
+          Object.entries(poolGpus).forEach(([poolStr, ids]) => {
+            const xs = ids.map((i) => ORIGIN_X + (i % COLS) * (TW + HGAP));
+            const ys = ids.map((i) => ORIGIN_Y + Math.floor(i / COLS) * (TH + VGAP));
+            const minX = Math.min(...xs) - 5;
+            const minY = Math.min(...ys) - 5;
+            const maxX = Math.max(...xs) + TW + 5;
+            const maxY = Math.max(...ys) + TH + 5;
+            const outline = el('rect', {
+              x: minX, y: minY, width: maxX - minX, height: maxY - minY,
+              rx: 8, class: 'dev-pool-outline', fill: 'none',
+            }, gpusG);
+            outline.setAttribute('data-pool', poolStr);
+          });
+        }
+
+        calloutEl.textContent = layout.callout;
+        memFill.style.width = `${layout.meters.memory}%`;
+        conFill.style.width = `${layout.meters.concurrency}%`;
+        comFill.style.width = `${layout.meters.comm}%`;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render((t.getAttribute('data-mode') || 'colocate') as Mode);
+        });
+      });
+      render('colocate');
+    });
+  })();
+</script>
+
+<style>
+  .dev-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+
+  .dev-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+  }
+  .dev-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .dev-tab:hover { color: var(--text); border-color: var(--accent); }
+  .dev-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .dev-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+
+  /* :global: created via JS */
+  .dev-figure :global(.dev-gpu-rect) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.2;
+  }
+  .dev-figure :global(.dev-gpu-label) {
+    fill: var(--text-faint);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .dev-figure :global(.dev-pool-tag) {
+    fill: var(--text-muted);
+    font-size: 9px;
+    font-family: var(--font-mono);
+  }
+  .dev-figure :global(.dev-badge-rect) {
+    stroke-width: 1;
+    fill: var(--code-bg);
+    stroke: var(--border);
+    transition: all 250ms ease;
+  }
+  .dev-figure :global(.dev-badge-label) {
+    fill: var(--text);
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .dev-figure :global(.dev-m-actor   .dev-badge-rect) { fill: #dde5f3; stroke: #4a78c2; }
+  .dev-figure :global(.dev-m-actor   .dev-badge-label) { fill: #1e3a8a; }
+  .dev-figure :global(.dev-m-rollout .dev-badge-rect) { fill: #f5e0c3; stroke: #d08a3e; }
+  .dev-figure :global(.dev-m-rollout .dev-badge-label) { fill: #6b4422; }
+  .dev-figure :global(.dev-m-ref     .dev-badge-rect) { fill: #f0eee8; stroke: #8a8a8a; }
+  .dev-figure :global(.dev-m-ref     .dev-badge-label) { fill: #4a4a4a; }
+  .dev-figure :global(.dev-m-critic  .dev-badge-rect) { fill: #e3d9f3; stroke: #6b4ab8; }
+  .dev-figure :global(.dev-m-critic  .dev-badge-label) { fill: #3d2a6b; }
+  .dev-figure :global(.dev-m-rm      .dev-badge-rect) { fill: #d8ecd1; stroke: #4a8a3d; }
+  .dev-figure :global(.dev-m-rm      .dev-badge-label) { fill: #2d5523; }
+
+  .dev-figure :global(.dev-pool-outline) {
+    stroke: var(--accent);
+    stroke-width: 1.2;
+    stroke-dasharray: 5 4;
+    opacity: 0.6;
+  }
+
+  .dev-callout {
+    margin-top: 1rem;
+    padding: 0.9rem 1.1rem;
+    background: var(--code-bg);
+    border-radius: 6px;
+  }
+  .dev-callout p {
+    margin: 0 0 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .dev-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.85rem;
+  }
+  @media (max-width: 640px) {
+    .dev-stats { grid-template-columns: 1fr; }
+  }
+  .dev-stat {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 0.3rem;
+  }
+  .dev-stat-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .dev-meter {
+    height: 10px;
+    background: var(--bg);
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .dev-meter-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 50%;
+    transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.85;
+  }
+</style>

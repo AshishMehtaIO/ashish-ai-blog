@@ -1,0 +1,1102 @@
+---
+// Viz 11 — VERL iteration walkthrough. Step through one full PPO/GRPO/DAPO
+// training iteration with the actual VERL worker methods, config knobs that
+// control batch sizes, and tensor shape transformations annotated at each
+// step. Trainable models show 🔥; frozen models show ❄.
+//
+// Inspired by user-provided reference images showing the actor_rollout_worker
+// quadrants and the comprehensive PPO dataflow.
+---
+
+<figure class="iter-figure" aria-label="VERL iteration walkthrough">
+  <div class="iter-tabs" role="tablist">
+    <button type="button" role="tab" class="iter-tab active" data-algo="ppo"  aria-selected="true">PPO</button>
+    <button type="button" role="tab" class="iter-tab"        data-algo="grpo" aria-selected="false">GRPO</button>
+    <button type="button" role="tab" class="iter-tab"        data-algo="dapo" aria-selected="false">DAPO</button>
+    <div class="iter-tab-spacer"></div>
+    <span class="iter-step-counter">
+      step <strong data-readout="step-idx">1</strong> / <strong data-readout="step-total">12</strong>
+    </span>
+  </div>
+
+  <div class="iter-body">
+    <!-- Mini-map of stages (vertical on desktop, horizontal scroll on mobile) -->
+    <nav class="iter-stages" data-region="stages" aria-label="Iteration stages"></nav>
+
+    <!-- Main stage detail panel -->
+    <div class="iter-panel">
+      <header class="iter-panel-header">
+        <div class="iter-phase-pill" data-readout="phase">generation</div>
+        <h4 class="iter-panel-title" data-readout="title">Sample batch from dataset</h4>
+        <code class="iter-method" data-readout="method">DataLoader</code>
+      </header>
+
+      <svg viewBox="0 0 720 280" class="iter-svg" preserveAspectRatio="xMidYMid meet" role="img">
+        <defs>
+          <marker id="iter-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" />
+          </marker>
+        </defs>
+        <g data-region="diagram"></g>
+      </svg>
+
+      <div class="iter-explain">
+        <p data-region="desc"></p>
+        <dl class="iter-meta">
+          <dt>Config knobs</dt>
+          <dd data-region="config"></dd>
+          <dt>Tensor shape</dt>
+          <dd data-region="shape"></dd>
+          <dt>Runs per iteration</dt>
+          <dd data-region="frequency"></dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <div class="iter-controls">
+    <button type="button" class="iter-btn" data-control="prev" aria-label="Previous step">← prev</button>
+    <input type="range" min="0" max="11" step="1" value="0" class="iter-range" data-control="step" aria-label="Step" />
+    <button type="button" class="iter-btn" data-control="next" aria-label="Next step">next →</button>
+    <button type="button" class="iter-btn iter-btn-play" data-control="play" aria-label="Play">play</button>
+    <label class="iter-speed">
+      <span>speed</span>
+      <select data-control="speed">
+        <option value="2400">slow</option>
+        <option value="1600" selected>normal</option>
+        <option value="900">fast</option>
+      </select>
+    </label>
+  </div>
+
+  <figcaption>
+    One full training iteration, step by step. Each stage names the VERL worker method
+    that runs it, the config knobs that control batch sizes, and the tensor shape going
+    in and coming out. Trainable models are 🔥; frozen models are ❄.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Phase = 'gen' | 'prep' | 'train';
+    type Stage = {
+      id: string;
+      title: string;
+      method: string;
+      phase: Phase;
+      desc: string;
+      config: string[];   // each entry like "data.train_batch_size = B"
+      shape: string;      // e.g., "(B, T_prompt) → (B, T_prompt + T_resp)"
+      frequency: string;  // "once per iteration" or "× ppo_epochs · mini_batch loop"
+      diagram: (g: SVGGElement, ctx: { color: (p: Phase) => string; ns: string; el: typeof el }) => void;
+    };
+    type Algo = { name: string; stages: Stage[] };
+
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent?: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+
+    // Helper: draw a model "box" with fire/snowflake
+    function modelBox(parent: SVGGElement, x: number, y: number, w: number, h: number, label: string, trainable: boolean) {
+      const wrap = el('g', { class: `iter-model ${trainable ? 'is-train' : 'is-frozen'}`, transform: `translate(${x} ${y})` }, parent) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 10, class: 'iter-model-rect' }, wrap);
+      el('text', { x: w / 2 - 8, y: h / 2 + 5, class: 'iter-model-label', 'text-anchor': 'middle' }, wrap).textContent = label;
+      el('text', { x: 12, y: 22, class: 'iter-model-glyph' }, wrap).textContent = trainable ? '🔥' : '❄';
+      return wrap;
+    }
+
+    // Helper: draw a "batch of items" as rows of small circles
+    function batchBlob(parent: SVGGElement, x: number, y: number, cols: number, rows: number, klass = '') {
+      const r = 4, gap = 3;
+      const w = cols * (2 * r + gap) - gap;
+      const h = rows * (2 * r + gap) - gap;
+      const wrap = el('g', { class: `iter-blob ${klass}`, transform: `translate(${x} ${y})` }, parent) as SVGGElement;
+      for (let cr = 0; cr < rows; cr++) {
+        for (let cc = 0; cc < cols; cc++) {
+          el('circle', {
+            cx: cc * (2 * r + gap) + r,
+            cy: cr * (2 * r + gap) + r,
+            r: r,
+            class: 'iter-batch-dot',
+          }, wrap);
+        }
+      }
+      return { x, y, w, h };
+    }
+
+    function arrow(parent: SVGGElement, x1: number, y1: number, x2: number, y2: number, label?: string, klass = '') {
+      const p = el('path', {
+        d: `M ${x1} ${y1} L ${x2} ${y2}`,
+        class: `iter-arrow ${klass}`,
+        'marker-end': 'url(#iter-arrow)',
+        fill: 'none',
+      }, parent);
+      if (label) {
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+        el('text', { x: mx, y: my - 6, class: 'iter-arrow-label', 'text-anchor': 'middle' }, parent).textContent = label;
+      }
+      return p;
+    }
+
+    function workerBox(parent: SVGGElement, x: number, y: number, w: number, h: number, name: string, sub: string) {
+      const wrap = el('g', { class: 'iter-worker', transform: `translate(${x} ${y})` }, parent) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 8, class: 'iter-worker-rect' }, wrap);
+      el('text', { x: w / 2, y: 22, class: 'iter-worker-name', 'text-anchor': 'middle' }, wrap).textContent = name;
+      el('text', { x: w / 2, y: 40, class: 'iter-worker-sub', 'text-anchor': 'middle' }, wrap).textContent = sub;
+      return wrap;
+    }
+
+    // Common stages that appear across algorithms with small variations
+    const STAGE = {
+      sample: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'sample',
+        title: 'Sample batch of prompts from the dataset',
+        method: 'DataLoader',
+        phase: 'gen',
+        desc: 'A batch of prompts is drawn from the training dataset. This is what every iteration starts with — a row from a Parquet file becomes B prompts in a tensor.',
+        config: ['data.train_batch_size = B'],
+        shape: '(B, T_prompt)',
+        frequency: 'once per iteration',
+        diagram: (g) => {
+          const ds = el('g', { transform: 'translate(60 80)' }, g) as SVGGElement;
+          el('rect', { x: 0, y: 0, width: 120, height: 120, rx: 8, class: 'iter-dataset-rect' }, ds);
+          el('text', { x: 60, y: 65, class: 'iter-dataset-label', 'text-anchor': 'middle' }, ds).textContent = 'Dataset';
+          el('text', { x: 60, y: 85, class: 'iter-dataset-sub', 'text-anchor': 'middle' }, ds).textContent = '(parquet)';
+          arrow(g, 195, 140, 290, 140);
+          batchBlob(g, 310, 115, 8, 4, 'iter-blob-prompt');
+          el('text', { x: 350, y: 92, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'B prompts';
+          el('text', { x: 350, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'data.train_batch_size = B';
+        },
+      }),
+
+      generate: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => {
+        const N = algo === 'ppo' ? '1' : 'N';
+        const extra = algo === 'dapo' ? ' + filter degenerate groups' : '';
+        return {
+          id: 'generate',
+          title: `Generate ${algo === 'ppo' ? 'response' : 'N responses per prompt'}${extra}`,
+          method: 'actor_rollout_worker.generate_sequences',
+          phase: 'gen',
+          desc: algo === 'dapo'
+            ? 'The rollout engine (vLLM/SGLang) samples N responses per prompt — same as GRPO. DAPO adds a dynamic-sampling filter: groups where all N rewards turn out identical contribute no learning signal, so they are dropped and replaced by resampling.'
+            : algo === 'grpo'
+            ? 'The rollout engine (vLLM/SGLang) generates rollout.n independent responses per prompt. This is the source of the "group" in Group-Relative — the group statistics that follow need multiple samples per prompt.'
+            : 'The rollout engine (vLLM/SGLang) generates one response per prompt. The policy is frozen during generation; weights were just transferred from the trainer.',
+          config: algo === 'ppo'
+            ? ['rollout.n = 1', 'rollout.response_length = T_resp']
+            : ['rollout.n = N', 'rollout.response_length = T_resp'],
+          shape: algo === 'ppo'
+            ? '(B, T_prompt) → (B, T_prompt + T_resp)'
+            : '(B, T_prompt) → (B · N, T_prompt + T_resp)',
+          frequency: 'once per iteration',
+          diagram: (g) => {
+            batchBlob(g, 60, 110, 6, 4, 'iter-blob-prompt');
+            el('text', { x: 90, y: 95, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'B prompts';
+            arrow(g, 160, 130, 240, 130);
+            modelBox(g, 250, 60, 220, 110, 'Policy Model', false);
+            el('text', { x: 360, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = `rollout.n = ${N === '1' ? '1' : 'N'}`;
+            arrow(g, 480, 130, 560, 130);
+            const cols = algo === 'ppo' ? 6 : 10;
+            batchBlob(g, 565, 90, cols, 6, 'iter-blob-resp');
+            el('text', { x: 615, y: 72, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = algo === 'ppo' ? 'B responses' : 'B · N responses';
+          },
+        };
+      },
+
+      oldlp: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'oldlp',
+        title: 'Compute "old" log-probs (no grad)',
+        method: 'actor_rollout_worker.compute_log_prob',
+        phase: 'prep',
+        desc: 'Run the (frozen) policy over the full prompt+response sequences to record the log-probabilities of each generated token under the current policy. These become the denominator of PPO\'s importance-sampling ratio later. Done in micro-batches to fit memory.',
+        config: ['rollout.log_prob_micro_batch_size_per_gpu = μ_lp'],
+        shape: '(B' + (algo === 'ppo' ? '' : ' · N') + ', T) → logprobs (B' + (algo === 'ppo' ? '' : ' · N') + ', T_resp)',
+        frequency: 'once per iteration',
+        diagram: (g) => {
+          const cols = algo === 'ppo' ? 6 : 10;
+          batchBlob(g, 40, 90, cols, 6, 'iter-blob-resp');
+          arrow(g, 145, 130, 240, 130, 'micro-batch');
+          modelBox(g, 250, 60, 220, 110, 'Policy Model', false);
+          el('text', { x: 360, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'log_prob_micro_batch_size_per_gpu';
+          arrow(g, 480, 130, 560, 130);
+          batchBlob(g, 565, 100, 9, 5, 'iter-blob-logp');
+          el('text', { x: 612, y: 82, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'old logprobs';
+        },
+      }),
+
+      reflp: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'reflp',
+        title: 'Compute reference log-probs (no grad)',
+        method: 'ref_policy_worker.compute_ref_log_prob',
+        phase: 'prep',
+        desc: 'Same forward pass but through the frozen reference model (typically the SFT starting point). These log-probs are subtracted from the policy log-probs to get the per-token KL — used in the KL penalty.',
+        config: ['ref.log_prob_micro_batch_size_per_gpu = μ_ref', 'actor_rollout_ref.ref.path = <SFT model>'],
+        shape: 'same as above → ref logprobs',
+        frequency: 'once per iteration',
+        diagram: (g) => {
+          const cols = algo === 'ppo' ? 6 : 10;
+          batchBlob(g, 40, 90, cols, 6, 'iter-blob-resp');
+          arrow(g, 145, 130, 240, 130, 'micro-batch');
+          modelBox(g, 250, 60, 220, 110, 'Reference Model', false);
+          el('text', { x: 360, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'ref.log_prob_micro_batch_size_per_gpu';
+          arrow(g, 480, 130, 560, 130);
+          batchBlob(g, 565, 100, 9, 5, 'iter-blob-reflp');
+          el('text', { x: 612, y: 82, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'ref logprobs';
+        },
+      }),
+
+      values: (): Stage => ({
+        id: 'values',
+        title: 'Compute "old" values (PPO critic)',
+        method: 'critic_worker.compute_values',
+        phase: 'prep',
+        desc: 'Only for PPO. The critic (a value model — often a head over the actor backbone) produces V(s_t) at each token. GAE will combine these with rewards into advantages and returns.',
+        config: ['critic.ppo_micro_batch_size_per_gpu = μ_cri', 'critic.model.path = <value model>'],
+        shape: '(B, T) → values (B, T_resp)',
+        frequency: 'once per iteration',
+        diagram: (g) => {
+          batchBlob(g, 40, 90, 6, 6, 'iter-blob-resp');
+          arrow(g, 110, 130, 240, 130);
+          modelBox(g, 250, 60, 220, 110, 'Critic (value head)', false);
+          arrow(g, 480, 130, 560, 130);
+          batchBlob(g, 565, 100, 9, 5, 'iter-blob-val');
+          el('text', { x: 612, y: 82, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'old values';
+        },
+      }),
+
+      reward: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'reward',
+        title: 'Score responses' + (algo === 'dapo' ? ' (+ overlong shape)' : ''),
+        method: 'reward_manager.compute_score(...)',
+        phase: 'prep',
+        desc: algo === 'dapo'
+          ? 'A custom Python function scores each response (rule-based, like math correctness). DAPO additionally applies overlong reward shaping: a soft length penalty inside the hard context limit. The result is a scalar per response — typically placed at the last token (ORM-style).'
+          : 'A custom Python function (custom_reward_function.path) and/or a learned reward model scores each response. For math problems this is a rule-based correctness check. The output is a scalar per response, placed at the last response token (token_level_scores).',
+        config: algo === 'dapo'
+          ? ['custom_reward_function.path = your_module:compute_score', 'reward_model.enable = False / True', 'data.max_response_length = T_resp_max']
+          : ['custom_reward_function.path = your_module:compute_score', 'reward_model.enable = False / True'],
+        shape: '(B' + (algo === 'ppo' ? '' : ' · N') + ', T_resp) → rewards (same)',
+        frequency: 'once per iteration',
+        diagram: (g) => {
+          const cols = algo === 'ppo' ? 6 : 10;
+          batchBlob(g, 40, 90, cols, 6, 'iter-blob-resp');
+          arrow(g, 145, 130, 240, 130);
+          workerBox(g, 250, 80, 220, 100, 'reward_manager', algo === 'dapo' ? 'rule + RM + overlong shape' : 'rule + RM');
+          arrow(g, 480, 130, 560, 130);
+          batchBlob(g, 565, 110, 9, 4, 'iter-blob-reward');
+          el('text', { x: 610, y: 95, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'token-level scores';
+        },
+      }),
+
+      kladj: (): Stage => ({
+        id: 'kladj',
+        title: 'KL-adjust the token reward',
+        method: 'apply_kl_penalty(...)',
+        phase: 'prep',
+        desc: 'For each generated token, subtract β · KL(policy || ref) from the reward. This penalizes the policy for drifting from the reference. Skipped if KL is being added to the loss instead.',
+        config: ['algorithm.use_kl_in_reward = True', 'algorithm.kl_ctrl.kl_coef = β', 'algorithm.kl_penalty = kl | abs | mse | low_var_kl | full'],
+        shape: 'rewards − β · (old_lp − ref_lp)',
+        frequency: 'once per iteration (if in-reward KL)',
+        diagram: (g) => {
+          batchBlob(g, 40, 100, 8, 5, 'iter-blob-reward');
+          el('text', { x: 80, y: 86, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'rewards';
+          batchBlob(g, 40, 175, 8, 3, 'iter-blob-logp');
+          el('text', { x: 80, y: 168, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'old_lp − ref_lp';
+          arrow(g, 180, 130, 280, 130);
+          workerBox(g, 280, 80, 220, 100, 'KL adjust', 'r ← r − β · KL');
+          arrow(g, 520, 130, 600, 130);
+          batchBlob(g, 600, 100, 8, 5, 'iter-blob-tokrew');
+          el('text', { x: 640, y: 86, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'token reward';
+        },
+      }),
+
+      advantage: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => {
+        const isPPO = algo === 'ppo';
+        return {
+          id: 'advantage',
+          title: isPPO ? 'Compute advantages with GAE' : 'Compute advantages from group statistics',
+          method: isPPO
+            ? 'core_algos.compute_gae_advantage_return(...)'
+            : 'core_algos.compute_grpo_outcome_advantage(...)',
+          phase: 'prep',
+          desc: isPPO
+            ? 'Generalized Advantage Estimation walks the per-token TD residuals to produce A_t and returns G_t. Needs values from the critic.'
+            : 'Group-relative: for each prompt\'s group of N responses, normalize the rewards by the group mean and std. The same advantage is broadcast to every token of each response (masked to response tokens).',
+          config: isPPO
+            ? ['algorithm.adv_estimator = "gae"', 'algorithm.gamma = γ', 'algorithm.lam = λ']
+            : ['algorithm.adv_estimator = "' + (algo === 'dapo' ? 'grpo' : 'grpo') + '"', 'algorithm.norm_adv_by_std_in_grpo = True'],
+          shape: isPPO
+            ? '(rewards, values) → advantages, returns'
+            : '(rewards, group_idx) → advantages',
+          frequency: 'once per iteration',
+          diagram: (g) => {
+            // Left side: inputs
+            batchBlob(g, 40, 80, 8, 4, 'iter-blob-tokrew');
+            el('text', { x: 75, y: 70, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'token reward';
+            if (isPPO) {
+              batchBlob(g, 40, 150, 8, 4, 'iter-blob-val');
+              el('text', { x: 75, y: 140, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'old values';
+            } else {
+              batchBlob(g, 40, 150, 8, 4, 'iter-blob-prompt');
+              el('text', { x: 75, y: 140, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'group index';
+            }
+            arrow(g, 180, 130, 280, 130);
+            workerBox(g, 280, 80, 220, 100, isPPO ? 'GAE' : 'group-relative', isPPO ? 'TD walk · γ, λ' : 'mean/std normalization');
+            arrow(g, 520, 130, 600, 130);
+            batchBlob(g, 600, 95, 8, 5, 'iter-blob-adv');
+            el('text', { x: 640, y: 80, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'advantages';
+            if (isPPO) {
+              batchBlob(g, 600, 175, 8, 3, 'iter-blob-returns');
+              el('text', { x: 640, y: 168, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'returns';
+            }
+          },
+        };
+      },
+
+      ppoLoop: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'ppo-loop',
+        title: 'Enter the PPO inner loop',
+        method: 'for epoch in ppo_epochs: for mb in minibatches:',
+        phase: 'train',
+        desc: 'The same prepared batch is iterated over multiple times. Each inner iteration runs new forward pass(es) on the policy (and critic), computes the loss, and steps the optimizer. This is the PPO surrogate objective\'s "multiple epochs over the same rollout" pattern.',
+        config: ['actor.ppo_epochs = K', 'actor.ppo_mini_batch_size = M'],
+        shape: 'full batch → K · ⌈B/M⌉ minibatches',
+        frequency: 'K × ⌈B / mini_batch_size⌉ times',
+        diagram: (g) => {
+          // Big batch → many small minibatches
+          batchBlob(g, 60, 75, 12, 6, 'iter-blob-adv');
+          el('text', { x: 105, y: 60, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'full batch';
+          arrow(g, 215, 130, 290, 130, 'split');
+          // mini-batches as 4 stacked rows
+          for (let i = 0; i < 4; i++) {
+            batchBlob(g, 300, 75 + i * 32, 4, 2, 'iter-blob-mini');
+          }
+          el('text', { x: 320, y: 70, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'minibatches';
+          arrow(g, 410, 130, 480, 130, 'loop');
+          workerBox(g, 490, 80, 200, 100, 'inner loop', 'forward · loss · step');
+          el('text', { x: 590, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'actor.ppo_epochs · ppo_mini_batch_size';
+        },
+      }),
+
+      newlp: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'newlp',
+        title: 'Compute "new" log-probs (with grad)',
+        method: 'actor.update_actor → forward(...)',
+        phase: 'train',
+        desc: 'Run the (now-being-updated) policy over the minibatch, this time WITH gradients. The new log-probs become the numerator of the importance-sampling ratio in the PPO surrogate.',
+        config: ['actor.ppo_micro_batch_size_per_gpu = μ_act', '(gradient accumulation → ppo_mini_batch_size)'],
+        shape: '(M, T) → new logprobs (M, T_resp)',
+        frequency: 'once per minibatch step',
+        diagram: (g) => {
+          batchBlob(g, 40, 100, 6, 4, 'iter-blob-mini');
+          el('text', { x: 70, y: 90, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'minibatch';
+          arrow(g, 135, 130, 240, 130, 'micro-batch');
+          modelBox(g, 250, 60, 220, 110, 'Policy Model', true);
+          el('text', { x: 360, y: 195, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'actor.ppo_micro_batch_size_per_gpu';
+          arrow(g, 480, 130, 560, 130);
+          batchBlob(g, 565, 105, 6, 5, 'iter-blob-newlp');
+          el('text', { x: 595, y: 90, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = 'new logprobs';
+        },
+      }),
+
+      actorLoss: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'actor-loss',
+        title: 'Compute actor loss (PPO surrogate' + (algo === 'dapo' ? ', asymmetric clip + token-mean' : '') + ')',
+        method: algo === 'dapo' ? 'dapo_policy_loss(...)' : 'ppo_policy_loss(...)',
+        phase: 'train',
+        desc: algo === 'dapo'
+          ? 'The PPO surrogate with two DAPO tweaks: cliprange_low and cliprange_high are independent (asymmetric), giving finer control over how much positive vs negative IS-ratio drift is allowed. The loss is averaged across all response tokens equally (token-mean) so long correct responses are not diluted.'
+          : 'Standard PPO clipped surrogate: −min(ρ·A, clip(ρ, 1−ε, 1+ε)·A). The IS ratio ρ = exp(new_lp − old_lp). Backprops into the policy.',
+        config: algo === 'dapo'
+          ? ['actor.cliprange_low = 0.2', 'actor.cliprange_high = 0.28', 'actor.loss_agg_mode = "token-mean"']
+          : ['actor.clip_range = ε', 'actor.loss_agg_mode = "token-mean" | "seq-mean"'],
+        shape: '(new_lp, old_lp, advantages) → scalar loss',
+        frequency: 'once per minibatch step',
+        diagram: (g) => {
+          // Three input blobs
+          batchBlob(g, 40, 60, 5, 3, 'iter-blob-newlp');
+          el('text', { x: 65, y: 50, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'new_lp';
+          batchBlob(g, 40, 115, 5, 3, 'iter-blob-logp');
+          el('text', { x: 65, y: 105, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'old_lp';
+          batchBlob(g, 40, 170, 5, 3, 'iter-blob-adv');
+          el('text', { x: 65, y: 160, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'advantage';
+          arrow(g, 130, 130, 240, 130);
+          workerBox(g, 250, 80, 220, 100, algo === 'dapo' ? 'DAPO loss' : 'PPO clip loss',
+            algo === 'dapo' ? 'asym clip · token-mean' : 'min(ρA, clip(ρ)A)');
+          arrow(g, 480, 130, 580, 130);
+          el('circle', { cx: 610, cy: 130, r: 28, class: 'iter-scalar' }, g);
+          el('text', { x: 610, y: 124, class: 'iter-scalar-label', 'text-anchor': 'middle' }, g).textContent = 'L_actor';
+          el('text', { x: 610, y: 140, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'scalar';
+        },
+      }),
+
+      criticLoss: (): Stage => ({
+        id: 'critic-loss',
+        title: 'Compute critic loss',
+        method: 'critic.update_critic → mse_loss(...)',
+        phase: 'train',
+        desc: 'Regress the critic\'s new values against the returns from GAE. Typical loss: (V_θ − G)². The critic learns to predict cumulative reward — closer alignment makes future advantage estimates lower-variance.',
+        config: ['critic.ppo_micro_batch_size_per_gpu = μ_cri'],
+        shape: '(new_values, returns) → scalar loss',
+        frequency: 'once per minibatch step',
+        diagram: (g) => {
+          batchBlob(g, 40, 80, 5, 3, 'iter-blob-val');
+          el('text', { x: 65, y: 70, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'new V';
+          batchBlob(g, 40, 145, 5, 3, 'iter-blob-returns');
+          el('text', { x: 65, y: 135, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'returns';
+          arrow(g, 130, 120, 240, 120);
+          workerBox(g, 250, 75, 220, 100, 'critic loss', '(V − G)²');
+          arrow(g, 480, 120, 580, 120);
+          el('circle', { cx: 610, cy: 120, r: 28, class: 'iter-scalar' }, g);
+          el('text', { x: 610, y: 115, class: 'iter-scalar-label', 'text-anchor': 'middle' }, g).textContent = 'L_critic';
+          el('text', { x: 610, y: 130, class: 'iter-shape-label-sm', 'text-anchor': 'middle' }, g).textContent = 'scalar';
+        },
+      }),
+
+      step: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'optimizer-step',
+        title: 'Backward + optimizer step',
+        method: 'actor.optimizer.step()' + (algo === 'ppo' ? ' / critic.optimizer.step()' : ''),
+        phase: 'train',
+        desc: 'Accumulate gradients across micro-batches, all-reduce them across the data-parallel ranks, then take an optimizer step. The policy is now updated; the next minibatch will see slightly different logprobs from the same data.',
+        config: ['actor.optim.lr = lr_a' + (algo === 'ppo' ? ', critic.optim.lr = lr_c' : ''), 'trainer.gradient_accumulation_steps (implicit from micro vs mini)'],
+        shape: 'gradients → updated parameters',
+        frequency: 'once per minibatch step',
+        diagram: (g) => {
+          el('circle', { cx: 80, cy: 80, r: 28, class: 'iter-scalar' }, g);
+          el('text', { x: 80, y: 76, class: 'iter-scalar-label', 'text-anchor': 'middle' }, g).textContent = 'L_actor';
+          if (algo === 'ppo') {
+            el('circle', { cx: 80, cy: 175, r: 28, class: 'iter-scalar' }, g);
+            el('text', { x: 80, y: 171, class: 'iter-scalar-label', 'text-anchor': 'middle' }, g).textContent = 'L_critic';
+          }
+          arrow(g, 120, 130, 240, 130, 'backward');
+          workerBox(g, 250, 80, 220, 100, 'optimizer.step()', 'AdamW · grad accum · DP all-reduce');
+          arrow(g, 480, 130, 560, 130, 'Δθ');
+          modelBox(g, 560, 60, 150, 110, 'Policy', true);
+        },
+      }),
+
+      loopBack: (algo: 'ppo' | 'grpo' | 'dapo'): Stage => ({
+        id: 'loop-back',
+        title: 'Loop: next minibatch, next epoch, next iteration',
+        method: 'trainer.fit() outer loop',
+        phase: 'train',
+        desc: 'After the PPO inner loop finishes (K epochs × ⌈B/M⌉ minibatches), the updated policy weights are streamed to the rollout engine, and the next iteration starts at step 1 with a fresh batch of prompts.',
+        config: ['trainer.total_epochs · len(dataset) / data.train_batch_size = total iterations'],
+        shape: 'updated policy → new rollouts',
+        frequency: 'until trainer.total_epochs reached',
+        diagram: (g) => {
+          modelBox(g, 250, 30, 220, 80, 'updated policy', true);
+          arrow(g, 470, 70, 600, 70, 'reshard');
+          modelBox(g, 480, 130, 220, 80, 'rollout engine', false);
+          arrow(g, 360, 220, 360, 250);
+          el('text', { x: 360, y: 245, class: 'iter-shape-label', 'text-anchor': 'middle' }, g).textContent = '↻ back to step 1';
+          el('text', { x: 360, y: 268, class: 'iter-config-label', 'text-anchor': 'middle' }, g).textContent = 'trainer.total_epochs · len(dataset) / data.train_batch_size';
+        },
+      }),
+    };
+
+    // Build per-algorithm stage lists
+    const PPO_STAGES: Stage[] = [
+      STAGE.sample('ppo'),
+      STAGE.generate('ppo'),
+      STAGE.oldlp('ppo'),
+      STAGE.reflp('ppo'),
+      STAGE.values(),
+      STAGE.reward('ppo'),
+      STAGE.kladj(),
+      STAGE.advantage('ppo'),
+      STAGE.ppoLoop('ppo'),
+      STAGE.newlp('ppo'),
+      STAGE.actorLoss('ppo'),
+      STAGE.criticLoss(),
+      STAGE.step('ppo'),
+      STAGE.loopBack('ppo'),
+    ];
+
+    const GRPO_STAGES: Stage[] = [
+      STAGE.sample('grpo'),
+      STAGE.generate('grpo'),
+      STAGE.oldlp('grpo'),
+      STAGE.reflp('grpo'),
+      STAGE.reward('grpo'),
+      STAGE.kladj(),
+      STAGE.advantage('grpo'),
+      STAGE.ppoLoop('grpo'),
+      STAGE.newlp('grpo'),
+      STAGE.actorLoss('grpo'),
+      STAGE.step('grpo'),
+      STAGE.loopBack('grpo'),
+    ];
+
+    const DAPO_STAGES: Stage[] = [
+      STAGE.sample('dapo'),
+      STAGE.generate('dapo'),
+      STAGE.oldlp('dapo'),
+      STAGE.reflp('dapo'),
+      STAGE.reward('dapo'),
+      STAGE.kladj(),
+      STAGE.advantage('dapo'),
+      STAGE.ppoLoop('dapo'),
+      STAGE.newlp('dapo'),
+      STAGE.actorLoss('dapo'),
+      STAGE.step('dapo'),
+      STAGE.loopBack('dapo'),
+    ];
+
+    const ALGOS: Record<string, Algo> = {
+      ppo:  { name: 'PPO',  stages: PPO_STAGES },
+      grpo: { name: 'GRPO', stages: GRPO_STAGES },
+      dapo: { name: 'DAPO', stages: DAPO_STAGES },
+    };
+
+    document.querySelectorAll<HTMLElement>('.iter-figure').forEach((fig) => {
+      const tabs        = Array.from(fig.querySelectorAll<HTMLButtonElement>('.iter-tab'));
+      const stagesNav   = fig.querySelector<HTMLElement>('[data-region="stages"]')!;
+      const diagramG    = fig.querySelector<SVGGElement>('[data-region="diagram"]')!;
+      const titleEl     = fig.querySelector<HTMLElement>('[data-readout="title"]')!;
+      const methodEl    = fig.querySelector<HTMLElement>('[data-readout="method"]')!;
+      const phaseEl     = fig.querySelector<HTMLElement>('[data-readout="phase"]')!;
+      const descEl      = fig.querySelector<HTMLElement>('[data-region="desc"]')!;
+      const configEl    = fig.querySelector<HTMLElement>('[data-region="config"]')!;
+      const shapeEl     = fig.querySelector<HTMLElement>('[data-region="shape"]')!;
+      const frequencyEl = fig.querySelector<HTMLElement>('[data-region="frequency"]')!;
+      const range       = fig.querySelector<HTMLInputElement>('[data-control="step"]')!;
+      const stepIdxEl   = fig.querySelector<HTMLElement>('[data-readout="step-idx"]')!;
+      const stepTotalEl = fig.querySelector<HTMLElement>('[data-readout="step-total"]')!;
+      const prevBtn     = fig.querySelector<HTMLButtonElement>('[data-control="prev"]')!;
+      const nextBtn     = fig.querySelector<HTMLButtonElement>('[data-control="next"]')!;
+      const playBtn     = fig.querySelector<HTMLButtonElement>('[data-control="play"]')!;
+      const speedSel    = fig.querySelector<HTMLSelectElement>('[data-control="speed"]')!;
+
+      let algoKey: string = 'ppo';
+      let stepIdx: number = 0;
+      let timer: number | null = null;
+
+      function renderStagesNav(stages: Stage[]) {
+        stagesNav.replaceChildren();
+        stages.forEach((s, i) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `iter-stage-btn iter-phase-${s.phase}`;
+          btn.dataset.idx = String(i);
+          btn.innerHTML = `<span class="iter-stage-num">${i + 1}</span><span class="iter-stage-name">${s.title}</span>`;
+          btn.addEventListener('click', () => { stopPlay(); setStep(i); });
+          stagesNav.appendChild(btn);
+        });
+      }
+
+      function setStep(idx: number) {
+        const algo = ALGOS[algoKey];
+        stepIdx = Math.max(0, Math.min(algo.stages.length - 1, idx));
+        const stage = algo.stages[stepIdx];
+
+        titleEl.textContent  = stage.title;
+        methodEl.textContent = stage.method;
+        phaseEl.textContent  = stage.phase === 'gen' ? 'generation' : stage.phase === 'prep' ? 'preparation' : 'training';
+        phaseEl.dataset.phase = stage.phase;
+        descEl.textContent   = stage.desc;
+        shapeEl.textContent  = stage.shape;
+        frequencyEl.textContent = stage.frequency;
+
+        configEl.replaceChildren();
+        stage.config.forEach((c) => {
+          const code = document.createElement('code');
+          code.textContent = c;
+          configEl.appendChild(code);
+        });
+
+        // Render the diagram
+        diagramG.replaceChildren();
+        stage.diagram(diagramG, { color: () => '', ns: NS, el });
+
+        // Update stage nav highlight
+        stagesNav.querySelectorAll<HTMLButtonElement>('.iter-stage-btn').forEach((b, i) => {
+          b.classList.toggle('is-active', i === stepIdx);
+          b.classList.toggle('is-past', i < stepIdx);
+        });
+
+        // Update range
+        range.value = String(stepIdx);
+        range.max = String(algo.stages.length - 1);
+        stepIdxEl.textContent = String(stepIdx + 1);
+        stepTotalEl.textContent = String(algo.stages.length);
+
+        prevBtn.disabled = stepIdx === 0;
+        nextBtn.disabled = stepIdx === algo.stages.length - 1;
+      }
+
+      function loadAlgo(key: string) {
+        algoKey = key;
+        const algo = ALGOS[key];
+        renderStagesNav(algo.stages);
+        setStep(0);
+      }
+
+      function stopPlay() {
+        if (timer !== null) { window.clearInterval(timer); timer = null; }
+        playBtn.textContent = 'play';
+        playBtn.dataset.state = 'idle';
+      }
+      function startPlay() {
+        stopPlay();
+        playBtn.textContent = 'pause';
+        playBtn.dataset.state = 'playing';
+        if (stepIdx >= ALGOS[algoKey].stages.length - 1) setStep(0);
+        const speed = parseInt(speedSel.value, 10) || 1600;
+        timer = window.setInterval(() => {
+          if (stepIdx >= ALGOS[algoKey].stages.length - 1) { stopPlay(); return; }
+          setStep(stepIdx + 1);
+        }, speed);
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          stopPlay();
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          loadAlgo(t.getAttribute('data-algo') || 'ppo');
+        });
+      });
+      prevBtn.addEventListener('click', () => { stopPlay(); setStep(stepIdx - 1); });
+      nextBtn.addEventListener('click', () => { stopPlay(); setStep(stepIdx + 1); });
+      range.addEventListener('input', () => { stopPlay(); setStep(parseInt(range.value, 10)); });
+      playBtn.addEventListener('click', () => {
+        if (playBtn.dataset.state === 'playing') stopPlay();
+        else startPlay();
+      });
+      speedSel.addEventListener('change', () => {
+        if (playBtn.dataset.state === 'playing') startPlay();
+      });
+
+      const io = new IntersectionObserver(
+        (entries) => entries.forEach((e) => { if (!e.isIntersecting) stopPlay(); }),
+        { threshold: 0.15 }
+      );
+      io.observe(fig);
+      document.addEventListener('visibilitychange', () => { if (document.hidden) stopPlay(); });
+
+      loadAlgo('ppo');
+    });
+  })();
+</script>
+
+<style>
+  .iter-figure {
+    margin: 2.5rem auto;
+    max-width: 940px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-elevated);
+  }
+
+  .iter-tabs {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--code-bg);
+  }
+  .iter-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.35rem 0.85rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .iter-tab:hover { color: var(--text); border-color: var(--accent); }
+  .iter-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .iter-tab-spacer { flex: 1; }
+  .iter-step-counter {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+  .iter-step-counter strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .iter-body {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 0;
+  }
+  @media (max-width: 880px) {
+    .iter-body { grid-template-columns: 1fr; }
+  }
+
+  .iter-stages {
+    border-right: 1px solid var(--border);
+    padding: 0.7rem 0.55rem;
+    background: var(--bg);
+    max-height: 600px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  @media (max-width: 880px) {
+    .iter-stages {
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      max-height: none;
+      flex-direction: row;
+      overflow-x: auto;
+      padding: 0.5rem;
+    }
+  }
+  /* :global(): stage buttons are created via JS — wrap selectors so styles apply */
+  .iter-figure :global(.iter-stage-btn) {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+    padding: 0.5rem 0.7rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    text-align: left;
+    cursor: pointer;
+    font-family: var(--font-sans);
+    transition: all 150ms ease;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+  @media (max-width: 880px) {
+    .iter-figure :global(.iter-stage-btn) { flex: 0 0 auto; max-width: 200px; }
+  }
+  .iter-figure :global(.iter-stage-btn:hover) {
+    background: var(--code-bg);
+    color: var(--text);
+  }
+  .iter-figure :global(.iter-stage-btn.is-active) {
+    background: var(--bg-elevated);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .iter-figure :global(.iter-stage-btn.is-past) {
+    color: var(--text-faint);
+  }
+  .iter-figure :global(.iter-stage-num) {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    background: var(--code-bg);
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .iter-figure :global(.iter-stage-btn.is-active .iter-stage-num) {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+  }
+  .iter-figure :global(.iter-stage-name) {
+    font-size: 0.78rem;
+    flex: 1;
+  }
+  /* Phase color bar on left edge */
+  .iter-figure :global(.iter-stage-btn::before) {
+    content: '';
+    align-self: stretch;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .iter-figure :global(.iter-stage-btn.iter-phase-gen::before)   { background: #d08a3e; }
+  .iter-figure :global(.iter-stage-btn.iter-phase-prep::before)  { background: #4a78c2; }
+  .iter-figure :global(.iter-stage-btn.iter-phase-train::before) { background: #6b4ab8; }
+
+  .iter-panel {
+    padding: 1rem 1.25rem 1.25rem;
+    min-width: 0;
+  }
+  .iter-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+  }
+  .iter-phase-pill {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: var(--code-bg);
+    color: var(--text-muted);
+  }
+  .iter-phase-pill[data-phase="gen"]   { background: #f5e0c3; color: #6b4422; }
+  .iter-phase-pill[data-phase="prep"]  { background: #dde5f3; color: #1e3a8a; }
+  .iter-phase-pill[data-phase="train"] { background: #e3d9f3; color: #3d2a6b; }
+  .iter-panel-title {
+    margin: 0;
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text);
+    flex: 1;
+    min-width: 0;
+  }
+  .iter-method {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    background: var(--code-bg);
+    padding: 0.18rem 0.5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
+  .iter-svg {
+    width: 100%;
+    height: auto;
+    background: var(--code-bg);
+    border-radius: 6px;
+    margin-bottom: 0.85rem;
+  }
+
+  /* :global() — diagram elements are created via JS */
+  .iter-figure :global(.iter-model-rect) {
+    fill: #faf3d8;
+    stroke: #c2a346;
+    stroke-width: 1.4;
+    transition: all 200ms ease;
+  }
+  .iter-figure :global(.is-train .iter-model-rect) {
+    fill: #faf3d8;
+    stroke: #d4881e;
+    stroke-width: 2;
+  }
+  .iter-figure :global(.is-frozen .iter-model-rect) {
+    fill: #dff0f7;
+    stroke: #6cabc7;
+  }
+  .iter-figure :global(.iter-model-label) {
+    fill: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font-serif);
+  }
+  .iter-figure :global(.iter-model-glyph) {
+    font-size: 16px;
+  }
+
+  .iter-figure :global(.iter-worker-rect) {
+    fill: #e8f3df;
+    stroke: #6ba84f;
+    stroke-width: 1.4;
+  }
+  .iter-figure :global(.iter-worker-name) {
+    fill: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .iter-figure :global(.iter-worker-sub) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+  }
+
+  .iter-figure :global(.iter-batch-dot) {
+    fill: #b5cfe8;
+    stroke: #4a78c2;
+    stroke-width: 0.5;
+  }
+  .iter-figure :global(.iter-blob-prompt .iter-batch-dot) { fill: #b5cfe8; }
+  .iter-figure :global(.iter-blob-resp .iter-batch-dot)   { fill: #b5cfe8; }
+  .iter-figure :global(.iter-blob-logp .iter-batch-dot),
+  .iter-figure :global(.iter-blob-newlp .iter-batch-dot)  { fill: #c4b5e8; stroke: #6b4ab8; }
+  .iter-figure :global(.iter-blob-reflp .iter-batch-dot)  { fill: #d6cfe8; stroke: #8a6bc4; }
+  .iter-figure :global(.iter-blob-val .iter-batch-dot)    { fill: #f3d4b5; stroke: #d08a3e; }
+  .iter-figure :global(.iter-blob-reward .iter-batch-dot) { fill: #d8ecd1; stroke: #4a8a3d; }
+  .iter-figure :global(.iter-blob-tokrew .iter-batch-dot) { fill: #d8ecd1; stroke: #4a8a3d; }
+  .iter-figure :global(.iter-blob-adv .iter-batch-dot)    { fill: #f5c6c6; stroke: #c25656; }
+  .iter-figure :global(.iter-blob-returns .iter-batch-dot){ fill: #efbfbf; stroke: #b04848; }
+  .iter-figure :global(.iter-blob-mini .iter-batch-dot)   { fill: #b5cfe8; stroke: #4a78c2; }
+
+  .iter-figure :global(.iter-dataset-rect) {
+    fill: #dff0f7;
+    stroke: #6cabc7;
+    stroke-width: 1.4;
+  }
+  .iter-figure :global(.iter-dataset-label) {
+    fill: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    font-family: var(--font-serif);
+  }
+  .iter-figure :global(.iter-dataset-sub) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+
+  .iter-figure :global(.iter-arrow) {
+    stroke: var(--text-muted);
+    stroke-width: 1.4;
+  }
+  .iter-figure :global(#iter-arrow path) {
+    fill: var(--text-muted);
+  }
+  .iter-figure :global(.iter-arrow-label) {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+
+  .iter-figure :global(.iter-shape-label) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+  .iter-figure :global(.iter-shape-label-sm) {
+    fill: var(--text-faint);
+    font-size: 9.5px;
+    font-family: var(--font-mono);
+  }
+  .iter-figure :global(.iter-config-label) {
+    fill: #c2435a;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  .iter-figure :global(.iter-scalar) {
+    fill: var(--accent);
+    opacity: 0.85;
+  }
+  .iter-figure :global(.iter-scalar-label) {
+    fill: var(--bg);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .iter-explain p {
+    margin: 0 0 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: var(--text);
+  }
+
+  .iter-meta {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.45rem 1rem;
+    font-size: 0.82rem;
+  }
+  .iter-meta dt {
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    color: var(--text-faint);
+    padding-top: 0.15rem;
+  }
+  .iter-meta dd {
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.6rem;
+  }
+  .iter-meta dd code {
+    background: var(--code-bg);
+    padding: 0.12rem 0.45rem;
+    border-radius: 3px;
+    color: #c2435a;
+    border: 1px solid var(--border);
+    font-size: 0.74rem;
+  }
+
+  .iter-controls {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto auto;
+    gap: 0.6rem;
+    align-items: center;
+    padding: 0.7rem 1rem 0.85rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  @media (max-width: 640px) {
+    .iter-controls { grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+    .iter-range { grid-column: 1 / -1; }
+  }
+  .iter-btn {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .iter-btn:hover:not(:disabled) {
+    background: var(--code-bg);
+    border-color: var(--accent);
+  }
+  .iter-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .iter-btn-play[data-state="playing"] {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+  }
+  .iter-range {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .iter-speed {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+  .iter-speed select {
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    padding: 0.3rem 0.5rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+</style>

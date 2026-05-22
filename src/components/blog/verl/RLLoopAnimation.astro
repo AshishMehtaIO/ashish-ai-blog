@@ -1,0 +1,257 @@
+---
+// Viz 1 — The LLM RL training loop, with VERL components highlighted at each stage.
+// Pattern: hand-authored inline SVG + per-figure script, vanilla JS.
+// Inspired by thinkingmachines.ai/blog/interaction-models's per-figure IIFE approach.
+---
+
+<figure class="rl-loop-figure" aria-label="Animated diagram of the LLM RL training loop">
+  <svg
+    viewBox="0 0 880 320"
+    role="img"
+    preserveAspectRatio="xMidYMid meet"
+    class="rl-loop-svg"
+    data-active-stage="0"
+  >
+    <defs>
+      <marker id="rl-loop-arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+
+    <!-- Stage nodes: 5 stages arranged horizontally with a return arrow over the top -->
+    <g class="stage" data-stage="1">
+      <rect x="20"  y="120" width="140" height="100" rx="10" />
+      <text class="stage-title"    x="90"  y="155">Prompt</text>
+      <text class="stage-sub"      x="90"  y="180">sample from dataset</text>
+      <text class="stage-component" x="90" y="208">DataLoader</text>
+    </g>
+
+    <g class="stage" data-stage="2">
+      <rect x="190" y="120" width="140" height="100" rx="10" />
+      <text class="stage-title"    x="260" y="155">Rollout</text>
+      <text class="stage-sub"      x="260" y="180">generate response</text>
+      <text class="stage-component" x="260" y="208">rollout worker</text>
+    </g>
+
+    <g class="stage" data-stage="3">
+      <rect x="360" y="120" width="140" height="100" rx="10" />
+      <text class="stage-title"    x="430" y="155">Reward</text>
+      <text class="stage-sub"      x="430" y="180">score response</text>
+      <text class="stage-component" x="430" y="208">reward fn · RM</text>
+    </g>
+
+    <g class="stage" data-stage="4">
+      <rect x="530" y="120" width="140" height="100" rx="10" />
+      <text class="stage-title"    x="600" y="155">Advantage</text>
+      <text class="stage-sub"      x="600" y="180">per-token signal</text>
+      <text class="stage-component" x="600" y="208">core_algos</text>
+    </g>
+
+    <g class="stage" data-stage="5">
+      <rect x="700" y="120" width="140" height="100" rx="10" />
+      <text class="stage-title"    x="770" y="155">Update</text>
+      <text class="stage-sub"      x="770" y="180">gradient step</text>
+      <text class="stage-component" x="770" y="208">actor · critic</text>
+    </g>
+
+    <!-- Forward arrows between consecutive stages -->
+    <g class="arrows">
+      <path class="arrow" data-arrow="1" d="M 160 170 L 190 170" marker-end="url(#rl-loop-arrowhead)" />
+      <path class="arrow" data-arrow="2" d="M 330 170 L 360 170" marker-end="url(#rl-loop-arrowhead)" />
+      <path class="arrow" data-arrow="3" d="M 500 170 L 530 170" marker-end="url(#rl-loop-arrowhead)" />
+      <path class="arrow" data-arrow="4" d="M 670 170 L 700 170" marker-end="url(#rl-loop-arrowhead)" />
+    </g>
+
+    <!-- Return arrow: Update → Prompt (arcs over the top) -->
+    <path
+      class="arrow return-arrow"
+      data-arrow="5"
+      d="M 770 120 C 770 30, 90 30, 90 120"
+      marker-end="url(#rl-loop-arrowhead)"
+      fill="none"
+    />
+    <text class="return-label" x="430" y="35">next iteration</text>
+
+    <!-- Pulse dots: one per arrow, animated by JS -->
+    <g class="pulses">
+      <circle class="pulse" data-pulse="1" r="5" cx="160" cy="170" />
+      <circle class="pulse" data-pulse="2" r="5" cx="330" cy="170" />
+      <circle class="pulse" data-pulse="3" r="5" cx="500" cy="170" />
+      <circle class="pulse" data-pulse="4" r="5" cx="670" cy="170" />
+      <circle class="pulse" data-pulse="5" r="5" cx="770" cy="120" />
+    </g>
+  </svg>
+  <figcaption>
+    The four-phase RL training loop, with the VERL component responsible for each phase named below the stage. The cycle repeats each training iteration.
+  </figcaption>
+</figure>
+
+<script>
+  // Per-figure script. Cycles the "active" stage on a timer, advances the pulse,
+  // pauses when the figure scrolls out of view, respects prefers-reduced-motion.
+  (function () {
+    const figures = document.querySelectorAll<HTMLElement>('.rl-loop-figure');
+    if (!figures.length) return;
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    figures.forEach((fig) => {
+      const svg = fig.querySelector<SVGElement>('.rl-loop-svg');
+      if (!svg) return;
+      const stages = Array.from(svg.querySelectorAll<SVGGElement>('.stage'));
+      const arrows = Array.from(svg.querySelectorAll<SVGPathElement>('.arrow'));
+      const pulses = Array.from(svg.querySelectorAll<SVGCircleElement>('.pulse'));
+
+      if (reduceMotion) {
+        stages.forEach((s) => s.classList.add('active'));
+        arrows.forEach((a) => a.classList.add('active'));
+        return;
+      }
+
+      const total = stages.length; // 5
+      let i = 0;
+      let timer: number | null = null;
+
+      const setActive = (idx: number) => {
+        stages.forEach((s, k) => s.classList.toggle('active', k === idx));
+        arrows.forEach((a, k) => a.classList.toggle('active', k === idx));
+        pulses.forEach((p, k) => p.classList.toggle('active', k === idx));
+        svg.setAttribute('data-active-stage', String(idx + 1));
+      };
+
+      const step = () => {
+        setActive(i);
+        i = (i + 1) % total;
+      };
+
+      const start = () => {
+        if (timer !== null) return;
+        step();
+        timer = window.setInterval(step, 1100);
+      };
+      const stop = () => {
+        if (timer === null) return;
+        window.clearInterval(timer);
+        timer = null;
+      };
+
+      const io = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((e) => (e.isIntersecting ? start() : stop()));
+        },
+        { threshold: 0.25 }
+      );
+      io.observe(fig);
+
+      // Pause when tab hidden to be a polite citizen
+      document.addEventListener('visibilitychange', () => {
+        document.hidden ? stop() : (io.takeRecords(), start());
+      });
+    });
+  })();
+</script>
+
+<style>
+  .rl-loop-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+
+  .rl-loop-svg {
+    width: 100%;
+    height: auto;
+    font-family: var(--font-sans);
+  }
+
+  /* Stage rectangles */
+  .stage rect {
+    fill: var(--bg-elevated);
+    stroke: var(--border-strong);
+    stroke-width: 1.25;
+    transition: fill 220ms ease, stroke 220ms ease;
+  }
+
+  .stage.active rect {
+    fill: var(--code-bg);
+    stroke: var(--accent);
+    stroke-width: 1.75;
+  }
+
+  /* Stage text */
+  .stage-title {
+    font-family: var(--font-serif);
+    font-size: 16px;
+    font-weight: 600;
+    text-anchor: middle;
+    fill: var(--text);
+  }
+  .stage-sub {
+    font-size: 11.5px;
+    text-anchor: middle;
+    fill: var(--text-muted);
+  }
+  .stage-component {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-anchor: middle;
+    fill: var(--text-faint);
+    transition: fill 220ms ease;
+  }
+  .stage.active .stage-component {
+    fill: var(--accent);
+  }
+
+  /* Arrows */
+  .arrow {
+    fill: none;
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    transition: stroke 220ms ease;
+  }
+  .arrow.active {
+    stroke: var(--accent);
+  }
+  #rl-loop-arrowhead path {
+    fill: var(--border-strong);
+  }
+  .return-arrow {
+    stroke-dasharray: 4 4;
+  }
+  .return-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    fill: var(--text-faint);
+    text-anchor: middle;
+    font-style: italic;
+  }
+
+  /* Pulse dots — hidden by default, faded in when active */
+  .pulse {
+    fill: var(--accent);
+    opacity: 0;
+    transition: opacity 220ms ease;
+  }
+  .pulse.active {
+    opacity: 0.9;
+    animation: rl-loop-pulse 1.05s ease-in-out infinite;
+  }
+  @keyframes rl-loop-pulse {
+    0%, 100% { r: 4; opacity: 0.55; }
+    50%      { r: 7; opacity: 0.95; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pulse,
+    .pulse.active {
+      animation: none;
+      opacity: 0;
+    }
+  }
+
+  /* On narrow screens, reduce font sizes proportionally — SVG already scales */
+  @media (max-width: 640px) {
+    .stage-title { font-size: 18px; }
+    .stage-sub { font-size: 13px; }
+    .stage-component { font-size: 13px; }
+  }
+</style>

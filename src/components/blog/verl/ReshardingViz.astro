@@ -1,0 +1,399 @@
+---
+// Viz 7 — 3D-HybridEngine parameter resharding. Same GPU pool shown in two
+// layouts (training: FSDP-sharded; rollout: TP), with the reshard between
+// them. Step button advances: train phase → reshard → rollout phase →
+// reshard back → train. Mirrors Figure 7 of the HybridFlow paper.
+---
+
+<figure class="resh-figure" aria-label="Parameter resharding between training and rollout phases">
+  <div class="resh-stage-label">
+    Phase: <strong data-readout="phase-name">Training</strong>
+    <span class="resh-step-detail" data-readout="phase-detail">FSDP layout — parameters sharded across the data-parallel ranks</span>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="resh-svg" role="img" preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <linearGradient id="resh-grad" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%"  stop-color="var(--accent)" stop-opacity="0.0" />
+        <stop offset="50%" stop-color="var(--accent)" stop-opacity="0.6" />
+        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0.0" />
+      </linearGradient>
+    </defs>
+
+    <!-- 8 GPU tiles in a 4x2 grid: same physical GPUs, two layouts depending on phase -->
+    <g data-region="gpus"></g>
+
+    <!-- Reshard flow overlay (visible only during reshard transitions) -->
+    <g data-region="reshard"></g>
+
+    <!-- Labels at sides -->
+    <text x="20" y="40"  class="resh-axis-label">phase →</text>
+    <text x="360" y="300" class="resh-phase-marker" text-anchor="middle" data-readout="phase-marker">training</text>
+  </svg>
+
+  <div class="resh-controls">
+    <button type="button" class="resh-btn" data-control="prev">← back</button>
+    <div class="resh-progress">
+      <div class="resh-progress-bar" data-readout="progress"></div>
+      <div class="resh-progress-ticks">
+        <span data-step="0">train</span>
+        <span data-step="1">reshard →</span>
+        <span data-step="2">rollout</span>
+        <span data-step="3">reshard ←</span>
+      </div>
+    </div>
+    <button type="button" class="resh-btn" data-control="next">step →</button>
+    <button type="button" class="resh-btn resh-btn-play" data-control="play">play</button>
+  </div>
+
+  <figcaption>
+    The same eight GPUs, two layouts. In training, the model is sharded across all eight (FSDP).
+    For rollout, the rollout engine expects a tensor-parallel layout — so VERL streams weights
+    directly between GPUs (no disk checkpoint), repacking the shards in flight. Step through to
+    see the four-state cycle.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Phase = 'train' | 'reshard-to-roll' | 'rollout' | 'reshard-to-train';
+    const PHASES: Phase[] = ['train', 'reshard-to-roll', 'rollout', 'reshard-to-train'];
+
+    const PHASE_INFO: Record<Phase, { name: string; detail: string; marker: string }> = {
+      'train': {
+        name: 'Training',
+        detail: 'FSDP layout — every GPU holds a shard of the parameters, gradients, and optimizer state. Forward/backward gather what they need and free it after.',
+        marker: 'training',
+      },
+      'reshard-to-roll': {
+        name: 'Resharding → rollout',
+        detail: 'Weights stream GPU-to-GPU via NCCL/HCCL. Training-engine shards are gathered and re-broadcast in the rollout engine\'s expected layout. No disk roundtrip.',
+        marker: 'resharding',
+      },
+      'rollout': {
+        name: 'Rollout',
+        detail: 'TP layout — the rollout engine (vLLM/SGLang) holds the full model in a tensor-parallel partition optimized for batched decoding.',
+        marker: 'rollout',
+      },
+      'reshard-to-train': {
+        name: 'Resharding → training',
+        detail: 'Reverse direction. Rollout-side weights return to the FSDP-sharded layout the trainer expects for the next iteration.',
+        marker: 'resharding',
+      },
+    };
+
+    document.querySelectorAll<HTMLElement>('.resh-figure').forEach((fig) => {
+      const gpusG     = fig.querySelector<SVGGElement>('[data-region="gpus"]')!;
+      const reshardG  = fig.querySelector<SVGGElement>('[data-region="reshard"]')!;
+      const nameEl    = fig.querySelector<HTMLElement>('[data-readout="phase-name"]')!;
+      const detailEl  = fig.querySelector<HTMLElement>('[data-readout="phase-detail"]')!;
+      const markerEl  = fig.querySelector<HTMLElement>('[data-readout="phase-marker"]')!;
+      const progress  = fig.querySelector<HTMLElement>('[data-readout="progress"]')!;
+      const prev      = fig.querySelector<HTMLButtonElement>('[data-control="prev"]')!;
+      const next      = fig.querySelector<HTMLButtonElement>('[data-control="next"]')!;
+      const play      = fig.querySelector<HTMLButtonElement>('[data-control="play"]')!;
+
+      let stepIdx = 0;
+      let timer: number | null = null;
+
+      const NS = 'http://www.w3.org/2000/svg';
+      // 8 GPUs in a 4x2 grid centered
+      const COLS = 4, ROWS = 2;
+      const TW = 132, TH = 92;
+      const HGAP = 14, VGAP = 14;
+      const GRID_W = COLS * TW + (COLS - 1) * HGAP;
+      const GRID_H = ROWS * TH + (ROWS - 1) * VGAP;
+      const ORIGIN_X = (720 - GRID_W) / 2;
+      const ORIGIN_Y = 70;
+
+      type GPU = { id: number; x: number; y: number };
+      const gpus: GPU[] = [];
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          gpus.push({
+            id: r * COLS + c,
+            x: ORIGIN_X + c * (TW + HGAP),
+            y: ORIGIN_Y + r * (TH + VGAP),
+          });
+        }
+      }
+
+      function renderGPUs(phase: Phase) {
+        gpusG.replaceChildren();
+        gpus.forEach((g) => {
+          const wrap = document.createElementNS(NS, 'g');
+          wrap.setAttribute('class', `resh-gpu phase-${phase}`);
+          wrap.setAttribute('transform', `translate(${g.x} ${g.y})`);
+          const rect = document.createElementNS(NS, 'rect');
+          rect.setAttribute('x', '0');
+          rect.setAttribute('y', '0');
+          rect.setAttribute('width', String(TW));
+          rect.setAttribute('height', String(TH));
+          rect.setAttribute('rx', '6');
+          rect.setAttribute('class', 'resh-gpu-rect');
+          wrap.appendChild(rect);
+
+          const label = document.createElementNS(NS, 'text');
+          label.setAttribute('x', '8');
+          label.setAttribute('y', '15');
+          label.setAttribute('class', 'resh-gpu-label');
+          label.textContent = `GPU ${g.id}`;
+          wrap.appendChild(label);
+
+          // Internal slot stripes — show how the model is partitioned on this GPU
+          // For training (FSDP): 8 colored slots, each GPU holds 1/8th of full params
+          // For rollout (TP): 4 colored slots (TP=4), pairs of GPUs share the same slice
+          renderSlots(wrap, phase, g.id);
+
+          gpusG.appendChild(wrap);
+        });
+      }
+
+      function renderSlots(parent: SVGGElement, phase: Phase, gpuId: number) {
+        const padX = 8, padY = 22, slotH = TH - padY - 10;
+        const innerW = TW - padX * 2;
+        // FSDP: each GPU owns slot[gpuId] of 8 (full params spread across all)
+        // TP: 4 partitions (TP=4); GPU 0,1 hold partition 0; GPU 2,3 hold partition 1; etc.
+        const slotCount = phase === 'rollout' || phase === 'reshard-to-roll' ? 4 : 8;
+        const owned = phase === 'rollout' || phase === 'reshard-to-roll'
+          ? Math.floor(gpuId / 2)
+          : gpuId;
+        const slotW = innerW / slotCount;
+        for (let s = 0; s < slotCount; s++) {
+          const r = document.createElementNS(NS, 'rect');
+          r.setAttribute('x', String(padX + s * slotW));
+          r.setAttribute('y', String(padY));
+          r.setAttribute('width', String(Math.max(1, slotW - 1.5)));
+          r.setAttribute('height', String(slotH));
+          r.setAttribute('rx', '2');
+          r.setAttribute('class', s === owned ? 'resh-slot resh-slot-owned' : 'resh-slot');
+          parent.appendChild(r);
+        }
+        // Layout label inside the GPU
+        const layoutText = document.createElementNS(NS, 'text');
+        layoutText.setAttribute('x', String(TW - 8));
+        layoutText.setAttribute('y', '15');
+        layoutText.setAttribute('class', 'resh-gpu-layout');
+        layoutText.setAttribute('text-anchor', 'end');
+        layoutText.textContent = (phase === 'rollout' || phase === 'reshard-to-roll')
+          ? 'TP slice ' + Math.floor(gpuId / 2)
+          : 'FSDP shard ' + gpuId;
+        parent.appendChild(layoutText);
+      }
+
+      function renderReshard(phase: Phase) {
+        reshardG.replaceChildren();
+        if (phase !== 'reshard-to-roll' && phase !== 'reshard-to-train') return;
+        // Animated bands sweeping across the GPU grid to indicate data transfer
+        for (let i = 0; i < 3; i++) {
+          const band = document.createElementNS(NS, 'rect');
+          band.setAttribute('x', String(ORIGIN_X));
+          band.setAttribute('y', String(ORIGIN_Y - 4));
+          band.setAttribute('width', String(GRID_W));
+          band.setAttribute('height', String(GRID_H + 8));
+          band.setAttribute('class', `resh-band resh-band-${i}`);
+          band.setAttribute('fill', 'url(#resh-grad)');
+          band.style.setProperty('--resh-delay', `${i * 350}ms`);
+          band.style.setProperty('--resh-dir', phase === 'reshard-to-roll' ? '1' : '-1');
+          reshardG.appendChild(band);
+        }
+      }
+
+      function setStep(i: number) {
+        stepIdx = ((i % PHASES.length) + PHASES.length) % PHASES.length;
+        const phase = PHASES[stepIdx];
+        renderGPUs(phase);
+        renderReshard(phase);
+        const info = PHASE_INFO[phase];
+        nameEl.textContent = info.name;
+        detailEl.textContent = info.detail;
+        markerEl.textContent = info.marker;
+        markerEl.setAttribute('class', `resh-phase-marker phase-${phase}`);
+        progress.style.width = `${((stepIdx + 1) / PHASES.length) * 100}%`;
+      }
+
+      function stopPlay() {
+        if (timer !== null) { window.clearInterval(timer); timer = null; }
+        play.textContent = 'play';
+      }
+      function startPlay() {
+        stopPlay();
+        play.textContent = 'pause';
+        timer = window.setInterval(() => setStep(stepIdx + 1), 1700);
+      }
+
+      prev.addEventListener('click', () => { stopPlay(); setStep(stepIdx - 1); });
+      next.addEventListener('click', () => { stopPlay(); setStep(stepIdx + 1); });
+      play.addEventListener('click', () => {
+        if (play.textContent === 'pause') stopPlay();
+        else startPlay();
+      });
+
+      const io = new IntersectionObserver(
+        (entries) => entries.forEach((e) => { if (!e.isIntersecting) stopPlay(); }),
+        { threshold: 0.15 }
+      );
+      io.observe(fig);
+      document.addEventListener('visibilitychange', () => { if (document.hidden) stopPlay(); });
+
+      setStep(0);
+    });
+  })();
+</script>
+
+<style>
+  .resh-figure {
+    margin: 2.5rem auto;
+    max-width: 880px;
+  }
+
+  .resh-stage-label {
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    margin-bottom: 0.6rem;
+    padding: 0.55rem 0.85rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  .resh-stage-label strong {
+    color: var(--accent);
+    font-weight: 600;
+    margin-right: 0.7rem;
+  }
+  .resh-step-detail {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+
+  .resh-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+
+  /* :global: created via JS */
+  .resh-figure :global(.resh-gpu-rect) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.2;
+    transition: all 250ms ease;
+  }
+  .resh-figure :global(.resh-gpu-label) {
+    fill: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .resh-figure :global(.resh-gpu-layout) {
+    fill: var(--text-muted);
+    font-size: 9px;
+    font-family: var(--font-mono);
+  }
+  .resh-figure :global(.resh-slot) {
+    fill: var(--code-bg);
+    stroke: var(--border);
+    stroke-width: 0.5;
+    transition: fill 350ms ease;
+  }
+  .resh-figure :global(.resh-slot-owned) {
+    fill: var(--accent);
+    opacity: 0.85;
+  }
+
+  .resh-figure :global(.phase-reshard-to-roll .resh-gpu-rect),
+  .resh-figure :global(.phase-reshard-to-train .resh-gpu-rect) {
+    stroke-dasharray: 4 3;
+    stroke: var(--accent);
+  }
+
+  .resh-figure :global(.resh-band) {
+    pointer-events: none;
+    animation: resh-sweep 1100ms ease-in-out infinite;
+    animation-delay: var(--resh-delay, 0ms);
+    transform-origin: center;
+  }
+  @keyframes resh-sweep {
+    0%   { opacity: 0; transform: translateX(calc(-100% * var(--resh-dir, 1))); }
+    40%  { opacity: 0.8; }
+    100% { opacity: 0; transform: translateX(calc(100% * var(--resh-dir, 1))); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .resh-figure :global(.resh-band) { animation: none; opacity: 0.4; transform: none; }
+  }
+
+  .resh-axis-label {
+    fill: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .resh-phase-marker {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+  }
+
+  .resh-controls {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 0.8rem;
+    align-items: center;
+    padding: 0.85rem 0 0;
+  }
+  .resh-btn {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .resh-btn:hover {
+    background: var(--code-bg);
+    border-color: var(--accent);
+  }
+  .resh-btn-play[data-state="playing"] {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+  }
+  .resh-progress {
+    position: relative;
+    height: 26px;
+    background: var(--code-bg);
+    border-radius: 13px;
+    overflow: hidden;
+  }
+  .resh-progress-bar {
+    height: 100%;
+    background: var(--accent);
+    width: 25%;
+    opacity: 0.2;
+    transition: width 350ms ease;
+  }
+  .resh-progress-ticks {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    align-items: center;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .resh-progress-ticks span {
+    text-align: center;
+  }
+</style>
