@@ -1,0 +1,244 @@
+---
+// Viz — RadixAttention prefix tree. Show how shared prefixes cache.
+---
+
+<figure class="ra-figure" aria-label="RadixAttention prefix tree">
+  <div class="ra-controls">
+    <button type="button" class="ra-btn" data-control="add">add request</button>
+    <button type="button" class="ra-btn" data-control="reset">reset</button>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="ra-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="tree"></g>
+  </svg>
+
+  <div class="ra-stats">
+    <div class="ra-stat"><span class="ra-label">requests</span><strong data-readout="reqs">0</strong></div>
+    <div class="ra-stat"><span class="ra-label">cache hits</span><strong data-readout="hits">0</strong></div>
+    <div class="ra-stat"><span class="ra-label">tokens cached</span><strong data-readout="tokens">0</strong></div>
+  </div>
+
+  <div class="ra-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Each request is a sequence of tokens. SGLang stores them in a radix tree. Shared prefixes
+    share KV-cache pages. Click "add request" to add a new request that may share a prefix with
+    existing ones — see the tree grow and the cache-hit count tick up.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Node = { id: string; label: string; children: Node[]; depth: number; hits: number };
+    const REQUESTS = [
+      { tokens: ['You are', 'helpful', 'assistant'], label: 'system prompt' },
+      { tokens: ['You are', 'helpful', 'assistant', 'User:', 'What is 2+2?'], label: 'sys + Q1' },
+      { tokens: ['You are', 'helpful', 'assistant', 'User:', 'What is 3+5?'], label: 'sys + Q2' },
+      { tokens: ['You are', 'helpful', 'assistant', 'User:', 'Tool result: 4', 'Assistant:'], label: 'sys + Q1 + tool' },
+      { tokens: ['You are', 'expert', 'in math'], label: 'different sys' },
+    ];
+
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    document.querySelectorAll<HTMLElement>('.ra-figure').forEach((fig) => {
+      const treeG = fig.querySelector<SVGGElement>('[data-region="tree"]')!;
+      const reqsEl = fig.querySelector<HTMLElement>('[data-readout="reqs"]')!;
+      const hitsEl = fig.querySelector<HTMLElement>('[data-readout="hits"]')!;
+      const tokensEl = fig.querySelector<HTMLElement>('[data-readout="tokens"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      let root: Node = { id: 'root', label: '∅', children: [], depth: 0, hits: 0 };
+      let requestCount = 0;
+      let totalHits = 0;
+      let totalTokens = 0;
+
+      function addRequest(req: typeof REQUESTS[number]) {
+        let node = root;
+        let hits = 0;
+        let newTokens = 0;
+        for (let i = 0; i < req.tokens.length; i++) {
+          const tok = req.tokens[i];
+          let child = node.children.find((c) => c.label === tok);
+          if (child) {
+            child.hits++;
+            hits++;
+          } else {
+            child = { id: `${node.id}-${tok}-${i}`, label: tok, children: [], depth: node.depth + 1, hits: 1 };
+            node.children.push(child);
+            newTokens++;
+          }
+          node = child;
+        }
+        requestCount++;
+        totalHits += hits;
+        totalTokens += newTokens;
+        if (hits > 0) {
+          calloutEl.textContent = `Added "${req.label}" — ${hits} tokens reused from existing prefix, ${newTokens} new tokens. Cache hit rate: ${((totalHits / (totalHits + totalTokens)) * 100).toFixed(0)}%.`;
+        } else {
+          calloutEl.textContent = `Added "${req.label}" — no shared prefix with existing requests, ${newTokens} new tokens.`;
+        }
+      }
+
+      function layoutTree() {
+        treeG.replaceChildren();
+        // BFS layout
+        const positions: Map<string, { x: number; y: number }> = new Map();
+        const ROW_H = 50;
+        const MIN_W = 110;
+        function layout(node: Node, x: number, y: number, allowedWidth: number): number {
+          positions.set(node.id, { x, y });
+          if (node.children.length === 0) return MIN_W;
+          let totalW = 0;
+          const widths: number[] = node.children.map(() => MIN_W);
+          // Recursively compute widths
+          // Simplified: each child gets MIN_W of horizontal space
+          const usedW = node.children.length * MIN_W;
+          const startX = x - usedW / 2 + MIN_W / 2;
+          node.children.forEach((c, i) => {
+            layout(c, startX + i * MIN_W, y + ROW_H, MIN_W);
+          });
+          return Math.max(MIN_W, usedW);
+        }
+        layout(root, 360, 30, 700);
+
+        // Draw edges
+        function drawEdges(node: Node) {
+          const p = positions.get(node.id)!;
+          node.children.forEach((c) => {
+            const cp = positions.get(c.id)!;
+            el('line', {
+              x1: p.x, y1: p.y + 12, x2: cp.x, y2: cp.y - 12,
+              class: 'ra-edge'
+            }, treeG);
+            drawEdges(c);
+          });
+        }
+        drawEdges(root);
+
+        // Draw nodes
+        function drawNodes(node: Node) {
+          const p = positions.get(node.id)!;
+          const isHot = node.hits > 1;
+          el('circle', {
+            cx: p.x, cy: p.y, r: isHot ? 10 : 7,
+            class: `ra-node ${isHot ? 'ra-node-hot' : ''}`
+          }, treeG);
+          el('text', {
+            x: p.x, y: p.y - 14,
+            class: 'ra-node-label', 'text-anchor': 'middle'
+          }, treeG).textContent = node.label;
+          if (node.hits > 1) {
+            el('text', {
+              x: p.x, y: p.y + 4,
+              class: 'ra-hit-count', 'text-anchor': 'middle'
+            }, treeG).textContent = String(node.hits);
+          }
+          node.children.forEach(drawNodes);
+        }
+        drawNodes(root);
+
+        reqsEl.textContent = String(requestCount);
+        hitsEl.textContent = String(totalHits);
+        tokensEl.textContent = String(totalTokens);
+      }
+
+      fig.querySelector<HTMLButtonElement>('[data-control="add"]')!.addEventListener('click', () => {
+        const idx = requestCount % REQUESTS.length;
+        addRequest(REQUESTS[idx]);
+        layoutTree();
+      });
+      fig.querySelector<HTMLButtonElement>('[data-control="reset"]')!.addEventListener('click', () => {
+        root = { id: 'root', label: '∅', children: [], depth: 0, hits: 0 };
+        requestCount = 0;
+        totalHits = 0;
+        totalTokens = 0;
+        calloutEl.textContent = '';
+        layoutTree();
+      });
+
+      layoutTree();
+    });
+  })();
+</script>
+
+<style>
+  .ra-figure { margin: 2.5rem 0; max-width: 880px; }
+  .ra-controls { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; }
+  .ra-btn {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .ra-btn:hover { background: var(--code-bg); border-color: var(--accent); }
+  .ra-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .ra-figure :global(.ra-node) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    transition: all 250ms ease;
+  }
+  .ra-figure :global(.ra-node-hot) {
+    fill: var(--accent);
+    stroke: var(--accent);
+  }
+  .ra-figure :global(.ra-edge) {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.6;
+  }
+  .ra-figure :global(.ra-node-label) {
+    fill: var(--text-muted);
+    font-size: 9.5px;
+    font-family: var(--font-mono);
+  }
+  .ra-figure :global(.ra-hit-count) {
+    fill: var(--bg);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .ra-stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .ra-stats { grid-template-columns: 1fr; } }
+  .ra-stat {
+    padding: 0.55rem 0.8rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  .ra-label {
+    display: block;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.2rem;
+  }
+  .ra-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    color: var(--text);
+  }
+  .ra-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    min-height: 1.5rem;
+  }
+  .ra-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

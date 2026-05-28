@@ -1,0 +1,219 @@
+---
+title: "The backends behind VERL: vLLM, SGLang, FSDP, Megatron"
+description: "Opening the box on VERL's pluggable engines. Why training and inference engines have opposite design pressures, how vLLM's PagedAttention and SGLang's RadixAttention work, how FSDP and Megatron-LM shard parameters, and how the 3D-HybridEngine bridges them."
+pubDate: 2026-06-26
+author: "Ashish"
+tags: ["verl", "rl", "llm", "vllm", "sglang", "fsdp", "megatron"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import PagedAttention from '../../components/blog/verl/PagedAttention.astro';
+import RadixAttention from '../../components/blog/verl/RadixAttention.astro';
+import FSDPAllGather from '../../components/blog/verl/FSDPAllGather.astro';
+import MegatronTP from '../../components/blog/verl/MegatronTP.astro';
+import BackendChoiceFlow from '../../components/blog/verl/BackendChoiceFlow.astro';
+
+The intro post in this series treated [VERL](https://github.com/verl-project/verl)'s backends as pluggable boxes: pick a rollout engine, pick a training engine, run. This post opens the boxes. We cover the four backends in production use — vLLM, SGLang for rollout; FSDP, Megatron-LM for training — what each one does internally, *why* each design exists, and how VERL's 3D-HybridEngine adapter shuttles weights between them.
+
+The central observation: **training and inference engines have opposite design pressures.** Training wants high throughput on large batches with sharded parameters and gradient computation. Inference wants low-latency per-token generation, paged KV caches, and full parameters resident on each GPU. You cannot have both. Hence two codebases, and an adapter.<Sidenote id="sn-prereqs">Assumes you've seen what FSDP and vLLM are at the surface. The internals matter when you're choosing a stack or debugging a performance regression. No expectation of having read other posts in this series.</Sidenote>
+
+## §1 — The split, from first principles
+
+Training a transformer means: forward pass producing activations, backward pass producing gradients, optimizer step updating parameters. All three steps touch every parameter and produce intermediate state proportional to model size × batch size × sequence length. Memory is dominated by activations and optimizer state. Parameters can be sharded across GPUs because every all-gather happens between forward and backward steps that have time to amortize the communication.
+
+Inference (generation) means: forward pass producing one token at a time, autoregressively. No backward, no optimizer. The dominant memory cost is the *KV cache* — the attention key/value vectors for every position in every sequence in the batch. The dominant time cost is the per-token forward, which is *unique per token* and cannot be batched across positions in one sequence (you can only batch across sequences).
+
+Concrete consequences:
+- Training engines want parameters sharded; inference engines want them replicated (or at most TP-sharded).
+- Training engines amortize communication across whole batches; inference engines do many small forwards.
+- Training engines see uniform sequence lengths in micro-batches; inference engines see wildly varying lengths.
+- Training engines run at maximum compute density; inference engines often sit memory-bound.
+
+This is why vLLM and SGLang are not just "PyTorch with extra tricks." They're separate systems built around the inference workload's specific needs.
+
+## §2 — vLLM: PagedAttention and continuous batching
+
+[vLLM](https://github.com/vllm-project/vllm) is the workhorse inference engine. Two ideas make it fast.
+
+### PagedAttention
+
+Naive batched inference allocates a contiguous KV cache per sequence: `(num_layers, num_heads, max_seq_len, head_dim)`. With max_seq_len=4096 and a batch of 32 sequences, that's an enormous reservation, mostly empty, because real sequences are usually much shorter than the max.
+
+<PagedAttention />
+
+PagedAttention borrows the OS page-table idea: split the KV cache into fixed-size *blocks* (typically 16 or 32 tokens). Each sequence maintains a list of block IDs. When a sequence grows, vLLM allocates a new block from a free pool. When a sequence finishes, its blocks return to the pool.
+
+The result: memory utilization shifts from "reserve max for all" to "use blocks as needed." A batch of 32 sequences with average length 800 tokens uses ~3× less KV memory than the naive layout, which means you can serve ~3× more concurrent sequences on the same hardware.
+
+The attention kernel is rewritten to handle non-contiguous block layouts. The cost is a small per-attention overhead from the indirection; the gain is massive memory efficiency.
+
+### Continuous batching
+
+Naive batched inference batches at sequence boundaries: you submit 32 prompts, wait for all to finish, then submit the next 32. Sequences finish at different times — the batch waits for the longest. Average GPU utilization is low.
+
+Continuous batching breaks this. At every decode step, vLLM re-composes the batch: new prompts enter as old sequences finish. Step 0 might have 32 sequences; step 1 might have 31 (one finished) plus 5 new prompts = 36. The scheduler runs every step, packing in as many sequences as the KV cache budget allows.
+
+For RL rollouts, this is enormous. A batch of math problems with varying difficulty produces wildly varying response lengths; continuous batching keeps the GPU saturated regardless.
+
+## §3 — SGLang: RadixAttention
+
+[SGLang](https://github.com/sgl-project/sglang) is the newer alternative. Its big idea: prefix caching with a *radix tree*.
+
+<RadixAttention />
+
+Many LLM workloads share prefixes. A multi-turn agent's turn 2 prompt is turn 1 plus new content. A few-shot evaluation reuses the same system prompt for every example. PagedAttention doesn't exploit this — the KV cache for turn 1's prefix tokens is recomputed when turn 2 starts. SGLang stores prefixes in a radix tree and reuses the KV cache when a new request shares a prefix with an existing entry.
+
+Implementation: a global radix tree maintains a mapping from token-sequence-prefixes to KV-cache pages. When a new request comes in, SGLang finds the longest prefix in the tree and reuses its KV pages — only computing KV for the suffix tokens. Cache eviction follows LRU.
+
+For multi-turn agents in VERL, this can be a 2-5× speedup over vLLM, because every turn after the first reuses the previous turn's KV cache. For workloads without shared prefixes (each request is independent), it's a wash.
+
+Other SGLang advantages over vLLM:
+- **Structured generation natively.** SGLang has first-class support for constrained decoding (regex, JSON schema, finite state machines). Useful for tool-call formats.
+- **Async server design.** Native FastAPI server with proper async cancellation.
+- **FP8 weights and KV cache.** Significant memory savings on H100+ hardware.
+- **Better tensor-parallel + data-parallel composition.** Easier to scale to many GPUs.
+
+VERL supports both engines behind the same `RolloutWorker` interface. The choice is a config flag.
+
+## §4 — FSDP internals
+
+[Fully Sharded Data Parallel](https://pytorch.org/docs/stable/fsdp.html) is PyTorch's first-class sharding solution. It shards parameters, gradients, and optimizer state across the data-parallel ranks.
+
+<FSDPAllGather />
+
+The mechanics:
+
+1. **Sharding.** Parameters are conceptually divided across N ranks: rank $i$ holds shard $i$ of every parameter (typically interleaved at the parameter level — every parameter is split across all ranks).
+
+2. **Forward pass.** When a layer is needed, FSDP issues an all-gather across the DP group, materializing the full parameter on each rank. The forward runs. The materialized parameter is freed.
+
+3. **Backward pass.** Symmetric. The full parameter is all-gathered for the backward, gradients are computed, then a reduce-scatter shrinks the gradient back to shards (each rank gets only its own shard of the gradient).
+
+4. **Optimizer step.** Each rank updates only its own shard. No further communication needed.
+
+Three properties this gives you:
+- **Memory per GPU = (params + grads + opt state) / N**. With N=8, you can fit 8× larger models than DDP.
+- **Communication cost per step is the same as ZeRO-3** (the technique FSDP is a refinement of).
+- **No code changes needed for most models.** Wrap with `FSDP(model)`, and PyTorch handles the rest.
+
+What FSDP isn't good at:
+- Single-stream tensor parallelism. FSDP shards across the *data* dimension; if your model's individual matrices don't fit on one GPU, FSDP alone won't help. You need TP for that.
+- Pipeline parallelism. Same — FSDP doesn't split layers across GPUs.
+
+For models up to ~70B on 8-GPU nodes, FSDP is typically sufficient. Beyond that, you need Megatron.
+
+## §5 — Megatron-LM internals
+
+[Megatron-LM](https://github.com/NVIDIA/Megatron-LM) combines three parallelism strategies: tensor (TP), pipeline (PP), and data (DP).
+
+<MegatronTP />
+
+**Tensor parallelism (TP).** Each layer's parameter matrices are split across GPUs. A matmul `Y = X · W` where W is split column-wise into `[W_1 | W_2 | ... | W_n]` produces `Y_1 = X · W_1`, etc. — and then an all-reduce combines them. The all-reduce is the communication cost; the gain is that each GPU only holds 1/n of the parameter matrix.
+
+TP groups are usually intra-node (NVLink-connected) because the all-reduce is per-layer.
+
+**Pipeline parallelism (PP).** Different *layers* are placed on different GPUs. GPU 0 holds layers 0-3; GPU 1 holds layers 4-7; etc. Activations flow through the pipeline. Naively this gives terrible utilization (the bubble), so Megatron uses micro-batching: split the batch into N micro-batches, run them through the pipeline with 1F1B scheduling so all GPUs are busy.
+
+PP groups are usually inter-node, because activations are smaller than parameters and the communication pattern (point-to-point between pipeline stages) is light.
+
+**Data parallelism (DP).** Standard data parallelism on top of TP+PP. Each (TP×PP) group is replicated across DP ranks; gradients are all-reduced across DP.
+
+Megatron lets you compose all three: `TP × PP × DP` = total GPU count. The composition matters — TP within nodes, PP across nodes, DP across replicas. For a 70B model on 64 H100s, a typical config might be TP=8, PP=4, DP=2.
+
+What Megatron costs:
+- Implementation complexity. You're not just `model = FSDP(model)`; you're writing a custom forward that handles split matrices and pipeline schedules.
+- Less flexibility. Once you pick TP/PP/DP degrees, changing them mid-run is hard.
+- More tuning surface. Three parallelism axes each with their own knobs.
+
+VERL wraps the complexity. You declare the TP/PP/DP composition in config and the framework handles the rest — but if something breaks at scale, you'll need to understand the layout.
+
+## §6 — The 3D-HybridEngine adapter
+
+VERL's 3D-HybridEngine is the layer that moves parameters between the training-side layout (FSDP-sharded or Megatron-TP-PP) and the rollout-side layout (vLLM/SGLang's TP-only sharding).
+
+The adapter's job is non-trivial because the sharding patterns are different:
+- FSDP training side: parameters sharded across all DP ranks (every rank has 1/N of each parameter).
+- Megatron training side: parameters sharded along TP and PP dimensions.
+- vLLM/SGLang rollout side: parameters either replicated (TP=1) or TP-sharded (TP=K, all on one node).
+
+The adapter handles the resharding *in flight* via NCCL/HCCL collectives — no disk checkpoint roundtrip. Bandwidth is the bottleneck (8 GB/s on H100+InfiniBand per the HybridFlow paper). For a 70B model in BF16 (~140GB), that's ~17 seconds of transfer time per iteration's parameter update — small relative to a multi-minute training step.
+
+We covered the resharding workflow visually in [the intro post](/ashish-ai-blog/blog/verl-mental-model/#resharding); the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/) goes deeper into the message ordering and bandwidth optimization.
+
+## §7 — Quantization in RL
+
+Modern inference engines support sub-BF16 weight formats: INT8, INT4, FP8. The math is roughly the same; the memory savings are substantial (FP8 = 50% reduction vs BF16, INT4 = 75% reduction).
+
+For *inference*, this is established practice. For *RL training*, three nuances:
+
+1. **The training engine almost always stays at BF16/FP16.** The gradients need the dynamic range. Quantizing during the forward and dequantizing for the backward partially works but adds complexity for marginal gain in training-side memory.
+
+2. **The rollout engine can run quantized**, with the policy serving in FP8 while training in BF16. This means the resharding step also converts dtype — the adapter has to handle BF16→FP8 quantization in flight. SGLang ≥0.5.5 supports this; vLLM is catching up.
+
+3. **The KV cache can be quantized independently.** FP8 KV cache halves rollout memory at minimal accuracy cost. Useful for serving long contexts.
+
+The net effect: with full FP8 (weights + KV cache) on the rollout side, you fit ~2× more concurrent sequences for the same rollout-side GPU memory. For long-context RL training, this is a major lever.
+
+## §8 — Choosing a stack
+
+<BackendChoiceFlow />
+
+A flowchart for picking the right combination, in rough order of decisions:
+
+1. **What's your model size?**
+   - ≤7B: FSDP + vLLM. Default. Works on a single 8-GPU node.
+   - 13B-70B on a single node: FSDP + vLLM/SGLang. SGLang if you have shared prefixes (multi-turn agents).
+   - 70B+ or multi-node: Megatron (TP×PP) + vLLM/SGLang.
+
+2. **Are you doing multi-turn agents?**
+   - Yes: SGLang for RadixAttention prefix caching. The speedup is real.
+   - No: vLLM. More mature, slightly faster on independent sequences.
+
+3. **Do you need structured generation (JSON, regex)?**
+   - Yes: SGLang has native support.
+   - No: vLLM is fine; structured generation can be added on top.
+
+4. **Memory pressure on rollout side?**
+   - High: FP8 weights + FP8 KV cache via SGLang.
+   - OK: BF16 throughout, simpler debugging.
+
+5. **Multi-node training?**
+   - Yes: Megatron + careful inter-node bandwidth provisioning. Plan resharding cost carefully.
+   - No: FSDP within node.
+
+## §9 — Three case studies
+
+**Case A: 7B math reasoning model on 8×H100.** FSDP + vLLM, single node, BF16. Group sampling N=8 with GRPO. Rollout takes 30% of iteration time; training takes 50%; resharding+other takes 20%. The bottleneck is training-side compute. Verdict: stack is well-balanced; no easy speedup.
+
+**Case B: 70B helpfulness model on 4×8×H100 = 32 GPUs.** Megatron TP=8 within node, PP=2 across nodes, DP=2. vLLM rollout at TP=8 (one node serves rollout while three nodes train, or with disaggregated pools). Resharding takes 25s per iteration (significant). Verdict: parameter resharding dominates the inter-phase cost; async rollout (one-step-off) is the right move to hide it.
+
+**Case C: Multi-turn agent fine-tuning, 13B model with code-execution tool.** FSDP + SGLang. SGLang's RadixAttention gives 3× speedup over vLLM because every turn's prompt is "previous turns + new instruction" — perfect prefix-cache hit rate. Tool latency (~500ms per call) dominates the rollout. Verdict: optimize the tool, not the inference engine.
+
+## §10 — Limits and current state
+
+What works well today:
+- vLLM and SGLang are mature, swap-in compatible behind VERL's rollout interface.
+- FSDP is the default and is rock-solid for ≤70B single-node.
+- The 3D-HybridEngine resharding works reliably for FSDP↔vLLM/SGLang.
+
+What's rougher:
+- **Multi-node FSDP↔rollout resharding** has more sharp edges. The communication topology matters; misconfigurations show up as slow or stuck transfers.
+- **Megatron↔SGLang** is newer integration. Works, but expect to read code if things break.
+- **LoRA + resharding** has gotchas. Adapter merging during resharding is supported but is the place edge cases live.
+- **Mid-run TP degree changes** mostly don't work. Plan your topology before launching.
+
+## §11 — A mental model
+
+VERL's backend story is: **train with the engine optimized for training; rollout with the engine optimized for inference; move weights between them with an adapter that hides the topology mismatch.** The two-codebase split is the right answer; trying to use one engine for both is the wrong answer (this is what older RLHF frameworks did, and it cost them throughput).
+
+The adapter is the unsung hero. Most of the engineering complexity in VERL is in the resharding logic — not because the rollout or training engines are simple individually, but because they're separately maintained external projects, and gluing them efficiently is hard. When you read VERL's `workers/sharding_manager/`, you're reading the code that makes the rest of the system work.
+
+The [next post in this series](/ashish-ai-blog/blog/verl-scaling-async/) takes the backends as given and asks: at what scale does what bottleneck dominate, and what's the engineering response.
+
+## References
+
+- Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C., Gonzalez, J., Zhang, H., Stoica, I. (2023). *Efficient Memory Management for Large Language Model Serving with PagedAttention.* [arXiv:2309.06180](https://arxiv.org/abs/2309.06180).
+- Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett, C., Sheng, Y. (2023). *SGLang: Efficient Execution of Structured Language Model Programs.* [arXiv:2312.07104](https://arxiv.org/abs/2312.07104).
+- Zhao, Y., Gu, A., Varma, R., Luo, L., Huang, C.-C., Xu, M., Wright, L., Shojanazeri, H., Ott, M., Shleifer, S., Desmaison, A., Balioglu, C., Damania, P., Nguyen, B., Chauhan, G., Hao, Y., Mathews, A., Li, S. (2023). *PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel.* [arXiv:2304.11277](https://arxiv.org/abs/2304.11277).
+- Shoeybi, M., Patwary, M., Puri, R., LeGresley, P., Casper, J., Catanzaro, B. (2019). *Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism.* [arXiv:1909.08053](https://arxiv.org/abs/1909.08053).
+- Narayanan, D., Shoeybi, M., Casper, J., LeGresley, P., et al. (2021). *Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM.* [arXiv:2104.04473](https://arxiv.org/abs/2104.04473).

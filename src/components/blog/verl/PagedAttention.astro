@@ -1,0 +1,222 @@
+---
+// Viz — PagedAttention. Show naive contiguous KV vs paged blocks. Slider
+// for batch size; see memory waste in naive vs paged.
+---
+
+<figure class="pa-figure" aria-label="PagedAttention KV cache visualization">
+  <div class="pa-tabs" role="tablist">
+    <button type="button" role="tab" class="pa-tab active" data-mode="naive" aria-selected="true">Naive contiguous</button>
+    <button type="button" role="tab" class="pa-tab"        data-mode="paged" aria-selected="false">PagedAttention</button>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="pa-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="layout"></g>
+  </svg>
+
+  <div class="pa-readouts">
+    <div class="pa-stat">
+      <span class="pa-label">memory allocated</span>
+      <strong data-readout="allocated">—</strong>
+    </div>
+    <div class="pa-stat">
+      <span class="pa-label">memory used</span>
+      <strong data-readout="used">—</strong>
+    </div>
+    <div class="pa-stat">
+      <span class="pa-label">utilization</span>
+      <strong data-readout="util">—</strong>
+    </div>
+  </div>
+
+  <div class="pa-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Six sequences with very different actual lengths. Naive layout reserves <code>max_seq_len</code>
+    for each (mostly wasted). PagedAttention allocates fixed blocks (16 tokens each) as sequences
+    grow, returning blocks to the pool when sequences finish. The result: much higher memory
+    utilization, ~3× more concurrent sequences on the same hardware.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // Six sequences with these actual lengths (in tokens)
+    const SEQUENCES = [200, 850, 1200, 400, 100, 2000];
+    const MAX_SEQ = 2048;
+    const BLOCK_SIZE = 128;  // larger for visual clarity
+
+    document.querySelectorAll<HTMLElement>('.pa-figure').forEach((fig) => {
+      const layoutG = fig.querySelector<SVGGElement>('[data-region="layout"]')!;
+      const allocReadout = fig.querySelector<HTMLElement>('[data-readout="allocated"]')!;
+      const usedReadout = fig.querySelector<HTMLElement>('[data-readout="used"]')!;
+      const utilReadout = fig.querySelector<HTMLElement>('[data-readout="util"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.pa-tab'));
+
+      function render(mode: 'naive' | 'paged') {
+        layoutG.replaceChildren();
+        const ROW_H = 26;
+        const ROW_GAP = 8;
+        const X_START = 100;
+        const X_END = 700;
+        const PIXELS_PER_TOKEN = (X_END - X_START) / MAX_SEQ;
+
+        let totalAllocated = 0;
+        let totalUsed = 0;
+
+        SEQUENCES.forEach((seqLen, i) => {
+          const y = 20 + i * (ROW_H + ROW_GAP);
+          // Label
+          el('text', { x: 90, y: y + ROW_H / 2 + 4, class: 'pa-row-label', 'text-anchor': 'end' }, layoutG).textContent = `seq ${i + 1}`;
+
+          if (mode === 'naive') {
+            // Allocated rect: full max_seq_len
+            el('rect', {
+              x: X_START, y, width: MAX_SEQ * PIXELS_PER_TOKEN, height: ROW_H,
+              class: 'pa-cell pa-cell-alloc-wasted'
+            }, layoutG);
+            // Used rect: actual length, overlaid
+            el('rect', {
+              x: X_START, y, width: seqLen * PIXELS_PER_TOKEN, height: ROW_H,
+              class: 'pa-cell pa-cell-used'
+            }, layoutG);
+            totalAllocated += MAX_SEQ;
+            totalUsed += seqLen;
+          } else {
+            // Paged: allocate blocks in any order
+            const numBlocks = Math.ceil(seqLen / BLOCK_SIZE);
+            const allocated = numBlocks * BLOCK_SIZE;
+            for (let b = 0; b < numBlocks; b++) {
+              // Sprinkle blocks across the row for visual effect (not contiguous)
+              const blockX = X_START + (((i * 7 + b * 3) % (Math.floor(MAX_SEQ / BLOCK_SIZE)))) * BLOCK_SIZE * PIXELS_PER_TOKEN;
+              const fillFrac = b === numBlocks - 1 ? (seqLen % BLOCK_SIZE) / BLOCK_SIZE : 1;
+              // Block outline (allocated)
+              el('rect', {
+                x: blockX, y, width: BLOCK_SIZE * PIXELS_PER_TOKEN - 1, height: ROW_H,
+                class: 'pa-cell pa-cell-block-alloc'
+              }, layoutG);
+              // Filled portion
+              el('rect', {
+                x: blockX, y, width: (BLOCK_SIZE * fillFrac || BLOCK_SIZE) * PIXELS_PER_TOKEN - 1, height: ROW_H,
+                class: 'pa-cell pa-cell-used'
+              }, layoutG);
+            }
+            totalAllocated += allocated;
+            totalUsed += seqLen;
+          }
+
+          // Length label at end
+          el('text', {
+            x: X_END + 8, y: y + ROW_H / 2 + 4,
+            class: 'pa-len-label', 'text-anchor': 'start'
+          }, layoutG).textContent = `${seqLen} tok`;
+        });
+
+        const util = (totalUsed / totalAllocated) * 100;
+        allocReadout.textContent = `${(totalAllocated / 1000).toFixed(1)}k tokens`;
+        usedReadout.textContent = `${(totalUsed / 1000).toFixed(1)}k tokens`;
+        utilReadout.textContent = `${util.toFixed(0)}%`;
+
+        if (mode === 'naive') {
+          calloutEl.textContent = 'Each sequence reserves max_seq_len (2048 tokens) regardless of actual length. Most of the allocated cache is empty — utilization is low. Adding more sequences hits the memory budget fast.';
+        } else {
+          calloutEl.textContent = 'Each sequence holds only the blocks it needs. The last block has some slack (sequences rarely end exactly on a block boundary), but the gap between allocated and used is much smaller. You can fit ~3× more sequences in the same memory.';
+        }
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render(t.getAttribute('data-mode') as 'naive' | 'paged');
+        });
+      });
+      render('naive');
+    });
+  })();
+</script>
+
+<style>
+  .pa-figure { margin: 2.5rem 0; max-width: 880px; }
+  .pa-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .pa-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .pa-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .pa-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .pa-figure :global(.pa-row-label) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .pa-figure :global(.pa-len-label) {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+  .pa-figure :global(.pa-cell-alloc-wasted) {
+    fill: var(--border);
+    opacity: 0.4;
+  }
+  .pa-figure :global(.pa-cell-used) {
+    fill: var(--accent);
+    opacity: 0.85;
+  }
+  .pa-figure :global(.pa-cell-block-alloc) {
+    fill: var(--code-bg);
+    stroke: var(--border-strong);
+    stroke-width: 0.5;
+  }
+  .pa-readouts {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.6rem;
+    margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .pa-readouts { grid-template-columns: 1fr; } }
+  .pa-stat {
+    padding: 0.55rem 0.8rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  .pa-label {
+    display: block;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.2rem;
+  }
+  .pa-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    color: var(--text);
+  }
+  .pa-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .pa-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

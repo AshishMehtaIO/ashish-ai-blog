@@ -1,0 +1,200 @@
+---
+// Viz — Backend choice flowchart. Pick model size, multi-turn?, etc., get a
+// recommended stack.
+---
+
+<figure class="bcf-figure" aria-label="Backend choice flowchart">
+  <div class="bcf-controls">
+    <label class="bcf-q">
+      <span class="bcf-label">model size</span>
+      <select data-control="size">
+        <option value="7b">≤7B</option>
+        <option value="70b" selected>13B–70B (single node)</option>
+        <option value="70b-multi">70B+ multi-node</option>
+      </select>
+    </label>
+    <label class="bcf-q">
+      <span class="bcf-label">multi-turn agent?</span>
+      <select data-control="multiturn">
+        <option value="no">no</option>
+        <option value="yes">yes</option>
+      </select>
+    </label>
+    <label class="bcf-q">
+      <span class="bcf-label">memory-constrained?</span>
+      <select data-control="memory">
+        <option value="no">no</option>
+        <option value="yes">yes (FP8)</option>
+      </select>
+    </label>
+    <label class="bcf-q">
+      <span class="bcf-label">structured generation?</span>
+      <select data-control="structured">
+        <option value="no">no</option>
+        <option value="yes">yes (JSON / regex)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="bcf-stage">
+    <div class="bcf-reco">
+      <span class="bcf-reco-tag">recommended stack</span>
+      <h4 class="bcf-reco-title" data-readout="title">—</h4>
+      <p class="bcf-reco-rationale" data-readout="rationale">—</p>
+      <pre class="bcf-reco-code" data-readout="config">—</pre>
+    </div>
+  </div>
+
+  <figcaption>
+    A flowchart for picking the right train + rollout backend combination. Move the dropdowns
+    to see the recommendation update. The reasoning is the same as in the post; this lets you
+    explore the decision space interactively.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    document.querySelectorAll<HTMLElement>('.bcf-figure').forEach((fig) => {
+      const sizeSel = fig.querySelector<HTMLSelectElement>('[data-control="size"]')!;
+      const mtSel = fig.querySelector<HTMLSelectElement>('[data-control="multiturn"]')!;
+      const memSel = fig.querySelector<HTMLSelectElement>('[data-control="memory"]')!;
+      const strSel = fig.querySelector<HTMLSelectElement>('[data-control="structured"]')!;
+      const titleEl = fig.querySelector<HTMLElement>('[data-readout="title"]')!;
+      const rationaleEl = fig.querySelector<HTMLElement>('[data-readout="rationale"]')!;
+      const configEl = fig.querySelector<HTMLElement>('[data-readout="config"]')!;
+
+      function recompute() {
+        const size = sizeSel.value;
+        const mt = mtSel.value === 'yes';
+        const mem = memSel.value === 'yes';
+        const str = strSel.value === 'yes';
+
+        // Training backend
+        let trainEngine = 'FSDP';
+        if (size === '70b-multi') trainEngine = 'Megatron-LM (TP × PP × DP)';
+
+        // Rollout backend
+        let rollEngine = 'vLLM';
+        let rollReason = 'mature, slightly faster for independent sequences';
+        if (mt || str) {
+          rollEngine = 'SGLang';
+          rollReason = mt ? 'RadixAttention prefix caching for shared multi-turn prompts' : 'native structured generation';
+        }
+        if (mem) {
+          if (rollEngine === 'SGLang') rollReason += '; FP8 weights + KV cache';
+          else { rollEngine = 'SGLang'; rollReason = 'FP8 support more mature than vLLM'; }
+        }
+
+        titleEl.textContent = `${trainEngine}  +  ${rollEngine}`;
+
+        let rationale = `Training: ${trainEngine}. `;
+        if (trainEngine === 'FSDP') {
+          rationale += 'Default for ≤70B single-node. Sharded params + grads + opt state; all-gather per layer. Drop-in PyTorch.';
+        } else {
+          rationale += 'Required at 70B+ multi-node. TP within nodes, PP across nodes, DP across replicas. More complex but the scaling sweet spot.';
+        }
+        rationale += ` Rollout: ${rollEngine} — ${rollReason}.`;
+        rationaleEl.textContent = rationale;
+
+        let cfg = '';
+        if (trainEngine === 'FSDP') {
+          cfg = `actor:
+  strategy: fsdp
+rollout:
+  name: ${rollEngine.toLowerCase()}\n`;
+          if (mem) cfg += '  dtype: fp8\n';
+        } else {
+          cfg = `actor:
+  strategy: megatron
+  tensor_model_parallel_size: 8
+  pipeline_model_parallel_size: 2
+rollout:
+  name: ${rollEngine.toLowerCase()}
+  tensor_model_parallel_size: 8\n`;
+          if (mem) cfg += '  dtype: fp8\n';
+        }
+        configEl.textContent = cfg.trim();
+      }
+
+      [sizeSel, mtSel, memSel, strSel].forEach((s) => s.addEventListener('change', recompute));
+      recompute();
+    });
+  })();
+</script>
+
+<style>
+  .bcf-figure { margin: 2.5rem 0; max-width: 880px; }
+  .bcf-controls {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px 6px 0 0;
+  }
+  @media (max-width: 640px) { .bcf-controls { grid-template-columns: 1fr; } }
+  .bcf-q { display: grid; gap: 0.3rem; }
+  .bcf-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .bcf-q select {
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    padding: 0.35rem 0.5rem;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .bcf-stage {
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    overflow: hidden;
+  }
+  .bcf-reco {
+    padding: 1rem 1.2rem 1.2rem;
+    background: var(--code-bg);
+    border-left: 3px solid var(--accent);
+  }
+  .bcf-reco-tag {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .bcf-reco-title {
+    margin: 0.3rem 0 0.6rem;
+    font-family: var(--font-serif);
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .bcf-reco-rationale {
+    margin: 0 0 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .bcf-reco-code {
+    margin: 0;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+  }
+</style>

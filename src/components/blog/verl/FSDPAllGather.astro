@@ -1,0 +1,192 @@
+---
+// Viz — FSDP all-gather flow. Show 4 GPUs each holding a shard;
+// per-layer all-gather materializes full parameter; freed after.
+---
+
+<figure class="fsdp-figure" aria-label="FSDP all-gather flow">
+  <div class="fsdp-controls">
+    <button type="button" class="fsdp-btn" data-control="play">play step</button>
+    <button type="button" class="fsdp-btn" data-control="reset">reset</button>
+    <div class="fsdp-state-label">phase: <strong data-readout="phase">sharded</strong></div>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="fsdp-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <text x="40" y="40" class="fsdp-row-label">GPU 0</text>
+    <text x="40" y="110" class="fsdp-row-label">GPU 1</text>
+    <text x="40" y="180" class="fsdp-row-label">GPU 2</text>
+    <text x="40" y="250" class="fsdp-row-label">GPU 3</text>
+
+    <g data-region="gpus"></g>
+
+    <text x="380" y="298" class="fsdp-axis-label" text-anchor="middle">parameter layout (1024-dim hidden, sharded 256/GPU)</text>
+  </svg>
+
+  <div class="fsdp-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    FSDP keeps parameters sharded across all DP ranks. When a layer is needed for forward or
+    backward, FSDP all-gathers the shards into the full parameter, runs the computation, then
+    frees the gathered tensor. Memory per GPU = (params + grads + opt state) / N. Click through
+    the phases.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const PHASES = ['sharded', 'all-gathering', 'forward', 'free', 'sharded-2'] as const;
+    type Phase = typeof PHASES[number];
+
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    document.querySelectorAll<HTMLElement>('.fsdp-figure').forEach((fig) => {
+      const gpusG = fig.querySelector<SVGGElement>('[data-region="gpus"]')!;
+      const phaseReadout = fig.querySelector<HTMLElement>('[data-readout="phase"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      const SHARDS_PER_GPU = 4;  // each GPU holds 1/4 of each parameter
+      const GPUS = 4;
+      const X_START = 110;
+      const X_END = 700;
+      const ROW_H = 30;
+      const ROW_GAP = 40;
+
+      let phaseIdx = 0;
+
+      const callouts: Record<Phase, string> = {
+        'sharded': 'Initial state: each GPU holds 1/4 of the parameter. Total memory = full size (distributed across 4 GPUs). To do forward on this layer, every GPU needs the full parameter.',
+        'all-gathering': 'All-gather: each GPU broadcasts its shard to all others. All-reduce-style collective. NCCL primitive: all_gather. Latency depends on inter-GPU bandwidth.',
+        'forward': 'Now every GPU has the full materialized parameter. Forward pass runs locally on each GPU\'s data shard. Memory pressure peaks here.',
+        'free': 'Forward done. The materialized full parameter is freed immediately. We\'re back to sharded — memory pressure drops to baseline.',
+        'sharded-2': 'Back to sharded. The next layer\'s parameters will be all-gathered when needed, then freed. This pattern repeats per layer through the network.',
+      };
+
+      function render() {
+        gpusG.replaceChildren();
+        const phase = PHASES[phaseIdx];
+        phaseReadout.textContent = phase;
+        calloutEl.textContent = callouts[phase];
+
+        for (let g = 0; g < GPUS; g++) {
+          const y = 25 + g * (ROW_H + ROW_GAP);
+          const shardW = (X_END - X_START) / SHARDS_PER_GPU - 4;
+
+          if (phase === 'sharded' || phase === 'sharded-2') {
+            // Each GPU has only its own shard, in the corresponding slot
+            const x = X_START + g * (shardW + 4);
+            el('rect', { x, y, width: shardW, height: ROW_H, rx: 3, class: `fsdp-shard fsdp-shard-${g}` }, gpusG);
+            el('text', { x: x + shardW/2, y: y + ROW_H/2 + 4, class: 'fsdp-shard-label', 'text-anchor': 'middle' }, gpusG).textContent = `shard ${g}`;
+          } else if (phase === 'all-gathering') {
+            // Show all shards on every GPU, semi-transparent (gathering in progress)
+            for (let s = 0; s < SHARDS_PER_GPU; s++) {
+              const x = X_START + s * (shardW + 4);
+              const ownShard = s === g;
+              el('rect', { x, y, width: shardW, height: ROW_H, rx: 3, class: `fsdp-shard fsdp-shard-${s} ${!ownShard ? 'is-gathering' : ''}` }, gpusG);
+              el('text', { x: x + shardW/2, y: y + ROW_H/2 + 4, class: 'fsdp-shard-label', 'text-anchor': 'middle' }, gpusG).textContent = `shard ${s}`;
+            }
+            // Arrows
+            if (g === 0) {
+              for (let s = 0; s < SHARDS_PER_GPU; s++) {
+                if (s === g) continue;
+                el('text', { x: 40, y: 305, class: 'fsdp-axis-label' }, gpusG).textContent = 'NCCL all_gather collective →';
+              }
+            }
+          } else if (phase === 'forward') {
+            // All shards on each GPU, fully opaque
+            for (let s = 0; s < SHARDS_PER_GPU; s++) {
+              const x = X_START + s * (shardW + 4);
+              el('rect', { x, y, width: shardW, height: ROW_H, rx: 3, class: `fsdp-shard fsdp-shard-${s}` }, gpusG);
+              el('text', { x: x + shardW/2, y: y + ROW_H/2 + 4, class: 'fsdp-shard-label', 'text-anchor': 'middle' }, gpusG).textContent = `shard ${s}`;
+            }
+            if (g === 0) {
+              el('text', { x: 360, y: 295, class: 'fsdp-axis-label fsdp-action', 'text-anchor': 'middle' }, gpusG).textContent = '⚡ forward pass on full parameter ⚡';
+            }
+          } else if (phase === 'free') {
+            // Brief intermediate — just own shard, with fade-out effect mocked
+            const x = X_START + g * (shardW + 4);
+            el('rect', { x, y, width: shardW, height: ROW_H, rx: 3, class: `fsdp-shard fsdp-shard-${g}` }, gpusG);
+            el('text', { x: x + shardW/2, y: y + ROW_H/2 + 4, class: 'fsdp-shard-label', 'text-anchor': 'middle' }, gpusG).textContent = `shard ${g}`;
+            if (g === 0) {
+              el('text', { x: 360, y: 295, class: 'fsdp-axis-label fsdp-action', 'text-anchor': 'middle' }, gpusG).textContent = 'gathered shards freed';
+            }
+          }
+        }
+      }
+
+      fig.querySelector<HTMLButtonElement>('[data-control="play"]')!.addEventListener('click', () => {
+        phaseIdx = (phaseIdx + 1) % PHASES.length;
+        render();
+      });
+      fig.querySelector<HTMLButtonElement>('[data-control="reset"]')!.addEventListener('click', () => {
+        phaseIdx = 0;
+        render();
+      });
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .fsdp-figure { margin: 2.5rem 0; max-width: 880px; }
+  .fsdp-controls {
+    display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.6rem;
+  }
+  .fsdp-btn {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .fsdp-btn:hover { background: var(--code-bg); border-color: var(--accent); }
+  .fsdp-state-label {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-left: auto;
+  }
+  .fsdp-state-label strong {
+    color: var(--accent);
+    font-family: var(--font-mono);
+  }
+  .fsdp-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .fsdp-row-label {
+    fill: var(--text);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .fsdp-axis-label { fill: var(--text-faint); font-size: 11px; font-family: var(--font-sans); }
+  .fsdp-action { fill: var(--accent); font-weight: 600; }
+  .fsdp-figure :global(.fsdp-shard) {
+    stroke: var(--border-strong);
+    stroke-width: 0.5;
+    transition: opacity 250ms ease;
+  }
+  .fsdp-figure :global(.fsdp-shard-0) { fill: #dde5f3; }
+  .fsdp-figure :global(.fsdp-shard-1) { fill: #f5e0c3; }
+  .fsdp-figure :global(.fsdp-shard-2) { fill: #d8ecd1; }
+  .fsdp-figure :global(.fsdp-shard-3) { fill: #e3d9f3; }
+  .fsdp-figure :global(.fsdp-shard.is-gathering) { opacity: 0.4; stroke-dasharray: 2 2; }
+  .fsdp-figure :global(.fsdp-shard-label) {
+    fill: var(--text);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .fsdp-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .fsdp-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

@@ -1,0 +1,186 @@
+---
+// Viz — Megatron TP+PP layout. Show 8 GPUs in a 2D grid with TP across rows
+// and PP across columns. Hover to highlight what each dimension does.
+---
+
+<figure class="mtp-figure" aria-label="Megatron TP+PP layout">
+  <div class="mtp-tabs" role="tablist">
+    <button type="button" role="tab" class="mtp-tab active" data-dim="tp" aria-selected="true">tensor parallel</button>
+    <button type="button" role="tab" class="mtp-tab"        data-dim="pp" aria-selected="false">pipeline parallel</button>
+    <button type="button" role="tab" class="mtp-tab"        data-dim="dp" aria-selected="false">data parallel</button>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="mtp-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="grid"></g>
+  </svg>
+
+  <div class="mtp-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Megatron-LM composes three parallelism strategies. Here: TP=4 within each pipeline stage,
+    PP=2 across stages, DP=2 across replicas. 4×2×2 = 16 GPUs total. The three tabs highlight
+    each dimension separately.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // 16 GPUs arranged as 2 replicas of [2 pipeline stages × 4 TP ranks]
+    const REPLICA_W = 320;
+    const PP_GAP = 18;
+    const TP_GAP = 10;
+    const TILE_W = 60;
+    const TILE_H = 50;
+
+    const CALLOUTS = {
+      tp: 'TP highlights GPUs that share a matrix multiplication. Each row of 4 GPUs computes one matmul together — the parameter matrix is split column-wise, each GPU computes a slice, all-reduce combines. Tightly coupled; usually within one node (NVLink).',
+      pp: 'PP highlights GPUs that hold consecutive layers. Stage 0 has layers 0-15; stage 1 has layers 16-31. Activations flow between stages. Looser coupling; can cross nodes. 1F1B scheduling keeps both stages busy with micro-batches.',
+      dp: 'DP highlights the two replicas. Each replica is an independent (TP×PP) configuration of 8 GPUs. Gradients all-reduce across DP at the end of the step. Loose coupling; can be across regions if needed.',
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.mtp-figure').forEach((fig) => {
+      const gridG = fig.querySelector<SVGGElement>('[data-region="grid"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.mtp-tab'));
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      function render(dim: 'tp' | 'pp' | 'dp') {
+        gridG.replaceChildren();
+
+        // Two replicas, side by side
+        for (let r = 0; r < 2; r++) {
+          const replicaX = 40 + r * (REPLICA_W + 40);
+          // Replica boundary
+          el('rect', {
+            x: replicaX - 12, y: 25, width: REPLICA_W + 14, height: 250, rx: 8,
+            class: `mtp-replica ${dim === 'dp' ? 'is-highlighted' : ''}`
+          }, gridG);
+          el('text', { x: replicaX + REPLICA_W / 2, y: 18, class: 'mtp-replica-label', 'text-anchor': 'middle' }, gridG).textContent = `replica ${r} (DP rank ${r})`;
+
+          for (let pp = 0; pp < 2; pp++) {
+            const stageY = 40 + pp * (TILE_H + 60);
+            // Stage label
+            el('text', { x: replicaX - 5, y: stageY + TILE_H / 2 + 4, class: 'mtp-stage-label', 'text-anchor': 'end' }, gridG).textContent = `pipeline stage ${pp}`;
+            // PP group highlight
+            if (dim === 'pp') {
+              for (let tp = 0; tp < 4; tp++) {
+                const x = replicaX + tp * (TILE_W + TP_GAP);
+                // outline
+              }
+              el('rect', {
+                x: replicaX - 6, y: stageY - 6, width: 4 * (TILE_W + TP_GAP), height: TILE_H + 12, rx: 6,
+                class: 'mtp-pp-band'
+              }, gridG);
+            }
+            for (let tp = 0; tp < 4; tp++) {
+              const x = replicaX + tp * (TILE_W + TP_GAP);
+              const y = stageY;
+              const tpHighlight = dim === 'tp';
+              el('rect', { x, y, width: TILE_W, height: TILE_H, rx: 4,
+                class: `mtp-tile ${tpHighlight ? 'is-tp-highlight' : ''}` }, gridG);
+              el('text', { x: x + TILE_W/2, y: y + 18, class: 'mtp-tile-num', 'text-anchor': 'middle' }, gridG).textContent = `GPU ${r * 8 + pp * 4 + tp}`;
+              el('text', { x: x + TILE_W/2, y: y + 35, class: 'mtp-tile-sub', 'text-anchor': 'middle' }, gridG).textContent = `tp ${tp}`;
+            }
+            // TP group highlight — wrap each row of 4
+            if (dim === 'tp') {
+              el('rect', {
+                x: replicaX - 4, y: stageY - 6, width: 4 * (TILE_W + TP_GAP) - 4, height: TILE_H + 12, rx: 6,
+                class: 'mtp-tp-band'
+              }, gridG);
+            }
+          }
+        }
+
+        calloutEl.textContent = CALLOUTS[dim];
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render(t.getAttribute('data-dim') as 'tp' | 'pp' | 'dp');
+        });
+      });
+      render('tp');
+    });
+  })();
+</script>
+
+<style>
+  .mtp-figure { margin: 2.5rem 0; max-width: 880px; }
+  .mtp-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .mtp-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .mtp-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .mtp-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .mtp-figure :global(.mtp-tile) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.2;
+  }
+  .mtp-figure :global(.mtp-tile.is-tp-highlight) {
+    fill: #dde5f3;
+    stroke: #4a78c2;
+  }
+  .mtp-figure :global(.mtp-tile-num) { fill: var(--text); font-size: 11px; font-weight: 600; font-family: var(--font-mono); }
+  .mtp-figure :global(.mtp-tile-sub) { fill: var(--text-muted); font-size: 9.5px; font-family: var(--font-mono); }
+  .mtp-figure :global(.mtp-tp-band) {
+    fill: none;
+    stroke: #4a78c2;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+  }
+  .mtp-figure :global(.mtp-pp-band) {
+    fill: rgba(208, 138, 62, 0.15);
+    stroke: #d08a3e;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+  }
+  .mtp-figure :global(.mtp-replica) {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 1;
+  }
+  .mtp-figure :global(.mtp-replica.is-highlighted) {
+    stroke: #6b4ab8;
+    stroke-width: 2;
+    fill: rgba(107, 74, 184, 0.06);
+  }
+  .mtp-replica-label {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .mtp-stage-label {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-sans);
+  }
+  .mtp-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .mtp-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>
