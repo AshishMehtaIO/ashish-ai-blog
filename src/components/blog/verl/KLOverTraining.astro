@@ -1,0 +1,192 @@
+---
+// Viz — KL over training. Slider for KL coefficient β; show how KL evolves.
+---
+
+<figure class="kot-figure" aria-label="KL over training">
+  <div class="kot-controls">
+    <label class="kot-slider">
+      <span class="kot-label">β (KL coefficient)</span>
+      <input type="range" min="0" max="100" step="1" value="20" data-control="beta" />
+      <output data-readout="beta">0.020</output>
+    </label>
+    <label class="kot-slider">
+      <span class="kot-label">target KL (adaptive)</span>
+      <input type="range" min="0" max="100" step="1" value="50" data-control="target" />
+      <output data-readout="target">0.10</output>
+    </label>
+    <label class="kot-checkbox">
+      <input type="checkbox" data-control="adaptive" checked /> use adaptive controller
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="kot-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <line x1="60" y1="220" x2="700" y2="220" class="kot-axis" />
+    <text x="50" y="225" class="kot-tick" text-anchor="end">0</text>
+    <text x="50" y="115" class="kot-tick" text-anchor="end" data-readout="kl-mid">0.5</text>
+    <text x="50" y="30" class="kot-tick" text-anchor="end" data-readout="kl-top">1.0</text>
+
+    <path data-region="curve" class="kot-curve" fill="none" />
+    <line class="kot-target" data-region="target-line" />
+
+    <text x="380" y="260" class="kot-axis-label" text-anchor="middle">training steps →</text>
+    <text x="20" y="125" class="kot-axis-label" text-anchor="middle" transform="rotate(-90 20 125)">KL to ref</text>
+  </svg>
+
+  <div class="kot-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Simulated KL trajectory under different settings. Without adaptive control, β too low lets KL
+    diverge; β too high pins KL near zero (no learning). The adaptive controller targets a
+    specific KL value and adjusts β to maintain it.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    const N = 50;
+
+    document.querySelectorAll<HTMLElement>('.kot-figure').forEach((fig) => {
+      const betaInput = fig.querySelector<HTMLInputElement>('[data-control="beta"]')!;
+      const targetInput = fig.querySelector<HTMLInputElement>('[data-control="target"]')!;
+      const adaptiveInput = fig.querySelector<HTMLInputElement>('[data-control="adaptive"]')!;
+      const betaReadout = fig.querySelector<HTMLOutputElement>('[data-readout="beta"]')!;
+      const targetReadout = fig.querySelector<HTMLOutputElement>('[data-readout="target"]')!;
+      const curvePath = fig.querySelector<SVGPathElement>('[data-region="curve"]')!;
+      const targetLine = fig.querySelector<SVGLineElement>('[data-region="target-line"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const klMidEl = fig.querySelector<HTMLElement>('[data-readout="kl-mid"]')!;
+      const klTopEl = fig.querySelector<HTMLElement>('[data-readout="kl-top"]')!;
+
+      function render() {
+        const beta = parseInt(betaInput.value, 10) / 1000;  // 0..0.1
+        const target = parseInt(targetInput.value, 10) / 500;  // 0..0.2
+        const adaptive = adaptiveInput.checked;
+        betaReadout.value = beta.toFixed(3);
+        targetReadout.value = target.toFixed(2);
+
+        // Simulate KL trajectory
+        const kls: number[] = [];
+        let kl = 0.02;
+        let curBeta = beta;
+        for (let t = 0; t < N; t++) {
+          // Reward force: pulls KL up
+          const drift = 0.02 * (1 - kl / 2);
+          // KL penalty force: pulls KL down proportional to β
+          const penalty = curBeta * kl * 10;
+          kl = Math.max(0.001, kl + drift - penalty + (Math.random() - 0.5) * 0.005);
+          kls.push(kl);
+          if (adaptive) {
+            // Simple proportional controller
+            if (kl > target * 1.5) curBeta *= 1.05;
+            else if (kl < target * 0.5) curBeta *= 0.95;
+            curBeta = Math.max(0.0001, Math.min(0.5, curBeta));
+          }
+        }
+
+        const yMax = Math.max(0.5, Math.max(...kls) * 1.2);
+        klMidEl.textContent = (yMax / 2).toFixed(2);
+        klTopEl.textContent = yMax.toFixed(2);
+
+        const X_START = 60, X_END = 700;
+        const Y_TOP = 30, Y_BOT = 220;
+        const xs = (i: number) => X_START + (i / (N - 1)) * (X_END - X_START);
+        const ys = (v: number) => Y_BOT - (v / yMax) * (Y_BOT - Y_TOP);
+
+        const d = kls.map((v, i) => (i === 0 ? 'M' : 'L') + ' ' + xs(i).toFixed(1) + ' ' + ys(v).toFixed(1)).join(' ');
+        curvePath.setAttribute('d', d);
+
+        // Target line
+        const yT = ys(target);
+        targetLine.setAttribute('x1', String(X_START));
+        targetLine.setAttribute('x2', String(X_END));
+        targetLine.setAttribute('y1', String(yT));
+        targetLine.setAttribute('y2', String(yT));
+
+        // Diagnose
+        const finalKL = kls[kls.length - 1];
+        let msg = '';
+        if (finalKL > 1.5) {
+          msg = '⚠ KL diverging — coefficient too low. Policy is drifting far from reference; expect language fluency to erode.';
+        } else if (finalKL < target * 0.3) {
+          msg = '⚠ KL pinned near zero — coefficient too high. Policy is over-regularized; learning is suppressed.';
+        } else if (adaptive && Math.abs(finalKL - target) / target < 0.4) {
+          msg = '✓ Adaptive controller is tracking the target. β is being adjusted to maintain KL ≈ target.';
+        } else if (Math.abs(finalKL - target) / target < 0.5) {
+          msg = 'KL settled near the target — β is roughly correct for this workload.';
+        } else {
+          msg = 'KL stable but off-target. The fixed β is not at the equilibrium value; try the adaptive controller.';
+        }
+        calloutEl.textContent = msg;
+      }
+
+      betaInput.addEventListener('input', render);
+      targetInput.addEventListener('input', render);
+      adaptiveInput.addEventListener('change', render);
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .kot-figure { margin: 2.5rem 0; max-width: 880px; }
+  .kot-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 0.6rem;
+  }
+  @media (max-width: 640px) { .kot-controls { grid-template-columns: 1fr; } }
+  .kot-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .kot-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .kot-slider input[type="range"] { accent-color: var(--accent); }
+  .kot-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 3rem;
+    text-align: right;
+  }
+  .kot-checkbox {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+  }
+  .kot-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .kot-axis { stroke: var(--border-strong); stroke-width: 1; }
+  .kot-tick { fill: var(--text-faint); font-size: 10px; font-family: var(--font-mono); }
+  .kot-axis-label { fill: var(--text-faint); font-size: 11px; font-family: var(--font-sans); }
+  .kot-curve { stroke: var(--accent); stroke-width: 2; }
+  .kot-target { stroke: #4a8a3d; stroke-width: 1.5; stroke-dasharray: 4 4; }
+  .kot-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    min-height: 2rem;
+  }
+  .kot-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

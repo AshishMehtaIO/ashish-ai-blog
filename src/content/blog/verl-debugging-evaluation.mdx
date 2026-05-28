@@ -1,0 +1,228 @@
+---
+title: "Debugging, evaluating, and observing VERL training runs"
+description: "The operational side of LLM RL. What to log, what healthy training looks like, the five named failure modes with their metric fingerprints, train-vs-prod rollout discrepancies, and a debugging playbook."
+pubDate: 2026-07-10
+author: "Ashish"
+tags: ["verl", "rl", "llm", "debugging", "observability", "evaluation"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import FailureFingerprints from '../../components/blog/verl/FailureFingerprints.astro';
+import KLOverTraining from '../../components/blog/verl/KLOverTraining.astro';
+import TrainVsProdDiff from '../../components/blog/verl/TrainVsProdDiff.astro';
+import LoggingDashboard from '../../components/blog/verl/LoggingDashboard.astro';
+
+LLM RL training is a long-feedback-loop activity full of silent failures. A run that looks healthy at step 100 can be subtly broken in ways you only notice at step 5000 when reward plateaus. This post is the operational reference: what to log, what healthy training looks like in those logs, the five named failure modes with their metric fingerprints, the train-vs-prod rollout discrepancies that silently destroy serving performance, and a concrete debugging playbook.
+
+The final post in this series.<Sidenote id="sn-prereqs">Assumes basic familiarity with [VERL](https://github.com/verl-project/verl) and the RL training loop. The fingerprints here generalize to any LLM RL framework but the specific metrics map directly to VERL\'s W&amp;B / TensorBoard integration.</Sidenote>
+
+## §1 — The canonical metric set
+
+For every training run, log these continuously:
+
+**Reward.** Mean reward across the batch, and the distribution (median, p10, p90). Should trend up; should not plateau early; the distribution shape tells you about diversity.
+
+**KL to reference.** Mean per-token KL between policy and reference. Should be small (~0.05-0.5) and stable. Sudden spikes are a danger signal; sustained zero means your KL coefficient is too high.
+
+**Advantage statistics.** Mean and std of advantages after normalization. The std should be roughly 1.0 (since most algorithms normalize). The mean should drift toward 0.
+
+**Gradient norm.** L2 norm of the actor gradient. Stable runs have a slowly-decaying gradient norm. Sudden spikes correlate with reward hacking, mode collapse, or NaN events.
+
+**Loss components.** Actor loss (clipped surrogate), critic loss (PPO only), entropy bonus (if used), KL term (if in loss). Should all be on similar scales; one term dominating is a sign of misconfigured coefficients.
+
+**Clip fraction.** Fraction of tokens where the PPO clip activated. Healthy: 5-15%. Too low: your trust region is wider than needed; you could use a larger ε. Too high (>30%): the policy is drifting fast and most of the gradient signal is being clipped — slow down (smaller lr, more PPO epochs).
+
+**Response length.** Mean and distribution. Watch for unprompted length explosion or collapse.
+
+**Rollout-side metrics.** Tool call count per response, tool error rate, response_mask coverage (what fraction of tokens are mask=1), generation speed.
+
+**Eval metrics.** A held-out evaluation runs every N steps. Track separately from training reward — eval reward should track training reward closely; divergence means overfitting to the training reward function.
+
+<LoggingDashboard />
+
+VERL emits all of these by default to whichever logger you configured (`trainer.logger`). The values land in W&B / TensorBoard / MLflow without extra code.
+
+## §2 — Healthy training, in pictures
+
+What a good run looks like:
+
+- **Reward** climbs steadily over 50-100k tokens, slowing as the policy saturates.
+- **KL** climbs gradually to a plateau (set by your KL coefficient / adaptive controller target).
+- **Advantage std** stays near 1.0; mean near 0.
+- **Gradient norm** decays smoothly, perhaps from ~5 to ~1 over the run.
+- **Clip fraction** stays in 5-15%.
+- **Response length** trends gently — maybe up slightly if the task rewards thoroughness, otherwise stable.
+- **Eval reward** mirrors training reward with a small constant gap.
+
+Bad runs deviate from this picture in *specific* ways — different deviations indicate different problems.
+
+## §3 — Five failure modes with fingerprints
+
+<FailureFingerprints />
+
+**Failure 1: KL explosion.** Mean KL spikes from 0.1 to 5+ within a few hundred steps. The policy has drifted catastrophically from the reference. Reward may continue to climb (the policy found a sequence space that scores well but is gibberish to humans).
+- Root cause: KL coefficient too low; learning rate too high; reward function rewards behavior far from the reference.
+- Fix: increase KL coefficient (often 5-10×); reduce lr; revisit reward function.
+
+**Failure 2: Mode collapse.** Reward plateaus or slightly drops; response diversity (unique-n-gram ratio) crashes. The policy converged to a small set of "safe" responses. KL is moderate, gradient norm decaying.
+- Root cause: weak reward signal that doesn't differentiate between mediocre and great responses; KL coefficient too high (prevents exploration).
+- Fix: add an entropy bonus; reduce KL coefficient slightly; diversify the reward function.
+
+**Failure 3: Reward hacking.** Training reward climbs sharply; eval reward stagnates or drops. The policy is gaming your reward function rather than solving the task.
+- Root cause: a bug in your reward function (loophole in the verifier, RM exploitation pattern).
+- Fix: see [the rewards post](/ashish-ai-blog/blog/verl-reward-functions/) §6 for the five named hacking patterns and their mitigations. Tighten your verifier first.
+
+**Failure 4: Gradient instability.** Gradient norm oscillates between 0 and 100; periodic NaN losses appear in logs.
+- Root cause: numerical instability — bf16 underflow in attention, learning rate too high for the data, very long responses with extreme advantages.
+- Fix: clip the gradient norm (`actor.grad_clip` or similar); reduce learning rate; add a small ε to denominators in custom code.
+
+**Failure 5: Train-vs-prod drift.** Training metrics look great. Production inference performs worse than the SFT baseline. The deployed model behaves differently from how it behaved during training rollouts.
+- Root cause: template mismatch, tokenizer mismatch, sampling parameter mismatch between training rollout and production serving.
+- Fix: see §5 below.
+
+## §4 — KL over training: an interactive view
+
+<KLOverTraining />
+
+The KL term against the reference is one of the most diagnostic metrics. The shapes you see in practice:
+
+- **Healthy**: gradual climb to a plateau set by your adaptive controller's target.
+- **Coefficient too high**: KL stays near zero; policy makes no progress.
+- **Coefficient too low**: KL climbs unboundedly; eventually language fluency erodes.
+- **Adaptive controller working**: KL oscillates around the target with the coefficient adjusting up and down to compensate.
+
+The slider in this viz lets you simulate different settings. Watch how KL behavior changes — and notice that "no progress" and "diverging" both look like flat regions if you only watch reward.
+
+## §5 — Train-vs-prod rollout discrepancies
+
+The silent killer. Your model gets great training metrics. You deploy it. It performs worse than the SFT baseline. Why?
+
+<TrainVsProdDiff />
+
+Four common sources:
+
+**Tokenization differences.** The training rollout used a tokenizer with `add_special_tokens=False` and a specific BOS handling; production inference uses the default. The model sees subtly different token sequences and behaves differently. Mitigation: pin the tokenizer config in both paths; diff-test.
+
+**Chat template differences.** Training used Llama-3's `<|begin_of_text|>...<|eot_id|>` template; production uses a different chat template version. The model produces tokens that don't match what production expects. Mitigation: use the same `tokenizer.apply_chat_template` call end-to-end.
+
+**Sampling parameter differences.** Training rolled out with temperature=1.0, top-p=0.95; production serves at temperature=0.7, top-p=1.0. The model's outputs change dramatically because the sampling distribution is different. Mitigation: match sampling params, or train with multiple sampling configurations (data augmentation across temperatures).
+
+**Reasoning content handling.** Modern reasoning models distinguish "thinking" tokens from "response" tokens. If training treats thinking tokens as response (response_mask=1 for them), but production strips thinking before showing the response, you're training the policy on a distribution it will never see in serving.
+
+**Diagnostic**: before deploying, run the same prompts through both pipelines (training-time rollout vs production serving) and diff the outputs. If they differ on >5% of prompts, the discrepancy is real and meaningful.
+
+## §6 — Evaluation during training
+
+Eval-during-training is a different problem than post-training eval. The constraints:
+
+- **Must be fast.** Eval runs every N training steps. If eval takes 10 minutes, your iteration time doubles. Use a small, representative eval set (~256 prompts).
+- **Must be diverse.** A single eval task overfits. Use 3-5 task types: in-distribution training-style prompts, out-of-distribution variants, adversarial prompts, format checks.
+- **Must use the same template as production.** Otherwise eval doesn't predict serving performance.
+- **Must not contaminate training.** Hash your eval prompts and assert they don't appear in training data.
+
+VERL supports custom eval datasets via `data.val_files`. The framework runs eval every `trainer.val_freq` steps. You configure the eval reward function the same way as the training reward function.
+
+A practical pattern: maintain two eval sets — a "training-style" set that should track training reward closely (sanity check), and a "production-style" set that mirrors what you actually serve. Track both. When they diverge, you have evidence of overfitting to the reward function vs the underlying task.
+
+## §7 — The W&B integration
+
+VERL\'s W&B integration is the path of least resistance for tracking runs. Set:
+
+```yaml
+trainer:
+  logger: wandb
+  project_name: my-verl-run
+  experiment_name: 70b-grpo-attempt-3
+```
+
+What you get out of the box: every metric in §1, hyperparameters captured, system metrics (GPU utilization, memory, disk I/O), and a stable URL per run.
+
+What to add manually:
+- **Custom metrics** for your task. If your reward function tracks specific signal types (correctness, format, length), log them separately.
+- **Sample rollouts**. Periodically log a few generated responses verbatim. This is the single highest-value addition — reading rollouts catches issues no metric will.
+- **System events**. When a tool times out, when a sandbox is restarted, when reshard takes longer than usual. Tag these so you can correlate with metric anomalies.
+
+W&B's "Reports" feature is good for postmortems. Run a study; once it ends, write a 1-page report with the key charts, hypotheses about what worked, and what to try next. Reports compound — your future self will thank past you.
+
+## §8 — Distributed debugging
+
+When ranks disagree, debugging is harder. Three patterns:
+
+**Hang or timeout.** A NCCL collective is waiting for a rank that's stuck. Use `TORCH_NCCL_DESYNC_DEBUG=1` to make NCCL emit per-rank state when it times out. The rank that's lagging is usually the culprit.
+
+**Rank-specific OOM.** One rank goes OOM while others have headroom. Usually a sharding or batching issue — uneven sequence lengths across ranks. Fix: turn on dynamic batching at the data loader level, or reduce micro-batch size.
+
+**Stochastic deviation across ranks.** The same operation gives different results on different ranks. Usually a non-determinism issue — different random seeds, dropout in different positions, non-deterministic ops (some CUDA kernels). Fix: set `torch.use_deterministic_algorithms(True)`; ensure seeds are sharded properly; expect a performance hit.
+
+## §9 — A debugging playbook
+
+When training is misbehaving, work through this in order:
+
+1. **Read the rollouts.** Sample 20 responses from the most recent training step. Look at them. Are they coherent? Are they doing the task? This catches 60% of bugs before you look at any metric.
+
+2. **Check the response_mask.** Histogram of response_mask=1 coverage. If many rollouts have very low mask coverage, the AgentLoop is treating tool outputs as policy outputs (or vice versa). See [the multi-turn post](/ashish-ai-blog/blog/verl-multi-turn-agentloop/) §8 for templating landmines.
+
+3. **Compare training reward vs eval reward.** If they diverge, you have reward hacking. Investigate the reward function.
+
+4. **Look at KL over time.** Use the fingerprint gallery in §3 to match the shape to a known failure mode.
+
+5. **Check the loss components.** If one term dwarfs the others, you have a coefficient issue.
+
+6. **Check gradient norms.** Spikes correlate with bad updates. Add `grad_clip` if not already on.
+
+7. **Profile.** If everything looks reasonable but training is slow, run a profiler. See [the scaling post](/ashish-ai-blog/blog/verl-scaling-async/) §7.
+
+8. **Diff against a known-good run.** If you have a previous run that worked, diff the configs. The smallest change is often the culprit.
+
+## §10 — Reproducibility
+
+Three claims about reproducibility in LLM RL:
+
+1. **Bit-exact reproducibility is rarely achievable.** Distributed training with mixed precision, non-deterministic CUDA kernels, and slight clock-time differences mean that two runs of the same config will diverge after a few thousand steps.
+
+2. **Statistical reproducibility is usually achievable.** With seeds fixed and most knobs the same, two runs should converge to similar final reward (within a few percent). If they don't, you have a real source of variance.
+
+3. **What matters is operational reproducibility.** Can you, three months from now, reproduce *approximately* what you got? This requires: pinning the code (git commit), the data (hash + version), the config (committed to repo), and the environment (Docker image with frozen versions).
+
+VERL emits all of these to W&B by default. Make sure your `trainer.experiment_name` includes the date or a unique tag so you can find runs by name later.
+
+## §11 — Limits of observability today
+
+What\'s rough:
+- **No built-in reward-hacking detection.** The five patterns in §3 are recognizable by eye but the framework doesn\'t flag them.
+- **No automatic eval-set drift detection.** If your eval set goes stale (the policy has overfit to it), nothing tells you.
+- **No standardized failure-mode taxonomy.** Different teams use different names for the same problems.
+- **Limited support for ad-hoc debugging in distributed mode.** PDB-on-rank-0 mostly works; cross-rank introspection is hard.
+
+What works well:
+- Logging is comprehensive out of the box.
+- W&B integration is solid.
+- The standard metric set covers most diagnostic needs.
+- Reading rollouts (the most important practice) is well-supported by VERL\'s default logging.
+
+## §12 — A mental model
+
+LLM RL training is *operationally* like distributed systems engineering: long-lived processes, intermittent silent failures, complex interactions between subsystems. The discipline is the same — comprehensive logging, runbook-style debugging, postmortems on incidents.
+
+The single most valuable practice: **read the rollouts.** Every training session, sample some responses, read them. Not the metric. The actual text. You will catch problems that no metric reveals, because metrics summarize and summaries lose information that humans pattern-match on instantly.
+
+The second most valuable practice: **diff against last good run.** Most failures are introduced by small changes. The git history is your first suspect.
+
+The third: **trust the fingerprints.** The five failure modes recur. Once you've seen each one, you spot it faster the next time. Tier-1 failures — KL explosion, mode collapse, reward hacking, gradient instability, train-vs-prod drift — cover ~80% of all training problems you'll encounter in VERL.
+
+This is the last post in the series. Across eight posts, we've covered the mental model of VERL, the algorithm zoo, reward design, multi-turn agents, environments and tools, the backend internals, scaling and async, and operations. The framework is genuinely well-designed; the abstractions are durable; the engineering complexity is in the places where it has to be. The path from "I want to do LLM RL" to "I am running a training job that works" is shorter than it used to be — but it still rewards taking the time to understand the moving parts.
+
+## References
+
+- The full series:
+  - [A mental model of VERL](/ashish-ai-blog/blog/verl-mental-model/)
+  - [PPO, GRPO, DAPO, and friends: VERL's algorithm zoo](/ashish-ai-blog/blog/verl-algorithm-zoo/)
+  - [Reward functions in VERL](/ashish-ai-blog/blog/verl-reward-functions/)
+  - [Multi-turn rollouts and AgentLoop in VERL](/ashish-ai-blog/blog/verl-multi-turn-agentloop/)
+  - [Custom environments and tools for VERL agents](/ashish-ai-blog/blog/verl-environments-tools/)
+  - [The backends behind VERL](/ashish-ai-blog/blog/verl-backends-internals/)
+  - [Scaling VERL](/ashish-ai-blog/blog/verl-scaling-async/)
+  - This post.
+- [W&B's RL guide](https://wandb.ai/).
+- [VERL logging configuration](https://verl.readthedocs.io/en/latest/).
+- [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness) for eval set design.

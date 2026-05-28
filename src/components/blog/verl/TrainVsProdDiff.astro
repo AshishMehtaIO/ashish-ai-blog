@@ -1,0 +1,142 @@
+---
+// Viz — Train vs prod rollout diff. Same prompt, two pipelines, see the diff.
+---
+
+<figure class="tvp-figure" aria-label="Train vs prod rollout diff">
+  <div class="tvp-tabs" role="tablist">
+    <button type="button" role="tab" class="tvp-tab active" data-source="tokenizer" aria-selected="true">tokenizer mismatch</button>
+    <button type="button" role="tab" class="tvp-tab"        data-source="template"  aria-selected="false">chat template</button>
+    <button type="button" role="tab" class="tvp-tab"        data-source="sampling"  aria-selected="false">sampling params</button>
+    <button type="button" role="tab" class="tvp-tab"        data-source="reasoning" aria-selected="false">reasoning content</button>
+  </div>
+
+  <div class="tvp-stage">
+    <div class="tvp-pane tvp-pane-train">
+      <h5 class="tvp-pane-label">training rollout</h5>
+      <pre class="tvp-text" data-region="train"></pre>
+    </div>
+    <div class="tvp-pane tvp-pane-prod">
+      <h5 class="tvp-pane-label">production inference</h5>
+      <pre class="tvp-text" data-region="prod"></pre>
+    </div>
+  </div>
+
+  <div class="tvp-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Four common train-vs-prod discrepancies. Same prompt, same model weights, different
+    pipelines. The diff is what kills serving performance after a successful training run.
+    Always diff-test before deploying.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const SPECS = {
+      tokenizer: {
+        train: '[BOS]<|user|>What is 2+2?<|end|>\n<|assistant|>',
+        prod:  '<|user|>What is 2+2?<|end|>\n<|assistant|>',
+        diff: 'Training adds [BOS] token (add_special_tokens=True). Production inference does not. The model sees a different input distribution and may produce different first-token outputs.',
+        fix: 'Pin tokenizer config. Both paths should use identical apply_chat_template + add_special_tokens settings.',
+      },
+      template: {
+        train: '<|begin_of_text|><|start_header_id|>user<|end_header_id|>\nWhat is 2+2?<|eot_id|>',
+        prod:  '<s>[INST] What is 2+2? [/INST]',
+        diff: 'Training used Llama-3 template. Production uses Llama-2 template (perhaps the wrong tokenizer version was installed). The model was trained to respond after <|eot_id|> but sees [/INST] in production.',
+        fix: 'Use the same model.tokenizer.apply_chat_template call in both paths. Pin tokenizer revision in your model loading.',
+      },
+      sampling: {
+        train: 'temperature=1.0\ntop_p=0.95\ntop_k=50\nmin_p=0.0',
+        prod:  'temperature=0.7\ntop_p=1.0\ntop_k=-1\nmin_p=0.05',
+        diff: 'Training rollouts used higher temperature for exploration. Production uses lower temperature for determinism. The model that was trained to behave at temperature 1.0 now sees temperature 0.7 — the output distribution shifts toward higher-probability tokens, which may not be what the policy optimized for.',
+        fix: 'Either match sampling params end-to-end, or train across multiple sampling configurations (data augmentation). The latter is more robust.',
+      },
+      reasoning: {
+        train: '<think>Let me compute 2+2. That\'s 4.</think>\nThe answer is 4.',
+        prod:  'The answer is 4.',
+        diff: 'Training used a reasoning model that produces thinking tokens. Training treats the full response (including thinking) as the policy output. Production strips thinking before display. The policy was trained on a distribution that includes thinking; in production, the parts of the response after thinking starts may be subtly off-distribution.',
+        fix: 'Align reasoning-content handling. Either include thinking in production output, or train with thinking masked out (response_mask=0 on thinking tokens).',
+      },
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.tvp-figure').forEach((fig) => {
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.tvp-tab'));
+      const trainEl = fig.querySelector<HTMLElement>('[data-region="train"]')!;
+      const prodEl = fig.querySelector<HTMLElement>('[data-region="prod"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      function show(key: keyof typeof SPECS) {
+        const s = SPECS[key];
+        trainEl.textContent = s.train;
+        prodEl.textContent = s.prod;
+        calloutEl.innerHTML = `<strong>Diff:</strong> ${s.diff}<br><br><strong>Fix:</strong> ${s.fix}`;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show(t.getAttribute('data-source') as keyof typeof SPECS);
+        });
+      });
+      show('tokenizer');
+    });
+  })();
+</script>
+
+<style>
+  .tvp-figure { margin: 2.5rem 0; max-width: 880px; }
+  .tvp-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .tvp-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .tvp-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+  .tvp-stage {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.85rem;
+  }
+  @media (max-width: 700px) { .tvp-stage { grid-template-columns: 1fr; } }
+  .tvp-pane {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.7rem 0.85rem;
+  }
+  .tvp-pane-train { border-left: 3px solid #4a8a3d; }
+  .tvp-pane-prod { border-left: 3px solid #d08a3e; }
+  .tvp-pane-label {
+    margin: 0 0 0.45rem;
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .tvp-text {
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+
+  .tvp-callout {
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .tvp-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

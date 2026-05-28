@@ -1,0 +1,227 @@
+---
+// Viz — Five failure-mode fingerprint charts. Tabs.
+---
+
+<figure class="ff-figure" aria-label="Failure mode fingerprints">
+  <div class="ff-tabs" role="tablist" data-region="tabs"></div>
+  <div class="ff-stage" data-region="stage"></div>
+  <figcaption>
+    Five named failure modes, each with a metric fingerprint on standard charts. Click through to
+    see the shape, the root cause, and the fix. Recognizing these patterns at a glance is the
+    operational skill that separates "I know how VERL works" from "I can debug a VERL run".
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Pattern = {
+      key: string;
+      name: string;
+      summary: string;
+      chart: { healthy: { reward: number[]; kl: number[] }; broken: { reward: number[]; kl: number[] } };
+      rootCause: string;
+      fix: string;
+    };
+    const PATTERNS: Pattern[] = [
+      {
+        key: 'kl-explosion',
+        name: '1. KL explosion',
+        summary: 'KL spikes; reward may continue to climb but the policy has drifted into gibberish.',
+        chart: {
+          healthy: { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+          broken:  { reward: [0.3,0.4,0.55,0.7,0.85,0.95,0.97,0.98,0.98,0.99], kl: [0.05,0.10,0.18,0.4,0.9,1.8,3.0,4.5,5.5,6.0] },
+        },
+        rootCause: 'KL coefficient too low for the reward signal; learning rate too high; reward function rewards behavior far from the reference.',
+        fix: 'Increase KL coefficient 5-10×; reduce learning rate; revisit reward function for hacking patterns.',
+      },
+      {
+        key: 'mode-collapse',
+        name: '2. Mode collapse',
+        summary: 'Reward plateaus; response diversity crashes. Policy converged to a small set of "safe" responses.',
+        chart: {
+          healthy: { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+          broken:  { reward: [0.3,0.4,0.5,0.55,0.6,0.6,0.59,0.58,0.58,0.58], kl: [0.05,0.07,0.08,0.08,0.08,0.07,0.06,0.05,0.05,0.05] },
+        },
+        rootCause: 'Weak reward signal that does not differentiate mediocre from great; KL coefficient too high; lack of entropy bonus.',
+        fix: 'Add an entropy bonus; reduce KL coefficient slightly; diversify reward function; increase sampling temperature.',
+      },
+      {
+        key: 'reward-hacking',
+        name: '3. Reward hacking',
+        summary: 'Training reward climbs sharply; eval reward stagnates or drops. Verifier loophole or RM exploitation.',
+        chart: {
+          healthy: { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+          broken:  { reward: [0.3,0.5,0.7,0.85,0.92,0.95,0.97,0.98,0.99,0.99], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+        },
+        rootCause: 'Bug in reward function (verifier loophole, RM stylistic bias, length exploit).',
+        fix: 'See the rewards post §6 for the five hacking patterns and mitigations. Tighten the verifier; diversify RM data; add format gates.',
+      },
+      {
+        key: 'gradient-instability',
+        name: '4. Gradient instability',
+        summary: 'Gradient norm oscillates wildly; NaN losses appear; periodic loss spikes.',
+        chart: {
+          healthy: { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+          broken:  { reward: [0.3,0.4,0.45,0.48,0.45,0.50,0.40,0.45,0.30,0.35], kl: [0.05,0.20,0.05,0.30,0.10,0.40,0.05,0.50,0.10,0.45] },
+        },
+        rootCause: 'Numerical instability (BF16 underflow, very long responses with extreme advantages, learning rate too high).',
+        fix: 'Enable gradient clipping (actor.grad_clip); reduce learning rate; add ε in denominators; consider switching to FP32 for sensitive ops.',
+      },
+      {
+        key: 'train-prod-drift',
+        name: '5. Train-vs-prod drift',
+        summary: 'Training looks great; production performs worse than SFT baseline. Templating or sampling mismatch.',
+        chart: {
+          healthy: { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+          broken:  { reward: [0.3,0.4,0.5,0.55,0.6,0.65,0.68,0.70,0.72,0.73], kl: [0.05,0.08,0.10,0.12,0.13,0.14,0.14,0.14,0.14,0.14] },
+        },
+        rootCause: 'Tokenizer, chat template, or sampling parameter mismatch between training rollout and production serving.',
+        fix: 'Pin tokenizer config end-to-end; use the same apply_chat_template call; match sampling params; diff outputs between paths.',
+      },
+    ];
+
+    function buildChart(p: Pattern, container: HTMLElement) {
+      const W = 600, H = 200;
+      const PAD_L = 60, PAD_R = 20, PAD_T = 20, PAD_B = 40;
+      const plotW = W - PAD_L - PAD_R, plotH = H - PAD_T - PAD_B;
+      const N = p.chart.healthy.reward.length;
+      const xs = (i: number) => PAD_L + (i / (N - 1)) * plotW;
+      const ymax = Math.max(...p.chart.broken.kl, ...p.chart.healthy.kl, 1);
+      const ys = (v: number) => PAD_T + (1 - v / ymax) * plotH;
+      const path = (data: number[]) => data.map((v, i) => (i === 0 ? 'M' : 'L') + ' ' + xs(i).toFixed(1) + ' ' + ys(v).toFixed(1)).join(' ');
+
+      container.innerHTML = `
+        <svg viewBox="0 0 ${W} ${H}" class="ff-chart" preserveAspectRatio="xMidYMid meet" role="img">
+          <line x1="${PAD_L}" y1="${PAD_T}" x2="${PAD_L}" y2="${H - PAD_B}" class="ff-axis" />
+          <line x1="${PAD_L}" y1="${H - PAD_B}" x2="${W - PAD_R}" y2="${H - PAD_B}" class="ff-axis" />
+          <text x="20" y="${PAD_T + plotH/2}" class="ff-axis-label" text-anchor="middle" transform="rotate(-90 20 ${PAD_T + plotH/2})">metric value</text>
+          <text x="${PAD_L + plotW/2}" y="${H - 8}" class="ff-axis-label" text-anchor="middle">training steps →</text>
+          <path d="${path(p.chart.healthy.reward)}" class="ff-line ff-line-healthy" fill="none" />
+          <path d="${path(p.chart.healthy.kl)}" class="ff-line ff-line-healthy-kl" fill="none" />
+          <path d="${path(p.chart.broken.reward)}" class="ff-line ff-line-broken" fill="none" />
+          <path d="${path(p.chart.broken.kl)}" class="ff-line ff-line-broken-kl" fill="none" />
+        </svg>
+        <div class="ff-legend">
+          <span class="ff-leg"><span class="ff-dot ff-dot-h"></span>healthy reward</span>
+          <span class="ff-leg"><span class="ff-dot ff-dot-hk"></span>healthy KL</span>
+          <span class="ff-leg"><span class="ff-dot ff-dot-b"></span>broken reward</span>
+          <span class="ff-leg"><span class="ff-dot ff-dot-bk"></span>broken KL</span>
+        </div>
+      `;
+    }
+
+    document.querySelectorAll<HTMLElement>('.ff-figure').forEach((fig) => {
+      const tabsEl = fig.querySelector<HTMLElement>('[data-region="tabs"]')!;
+      const stageEl = fig.querySelector<HTMLElement>('[data-region="stage"]')!;
+
+      PATTERNS.forEach((p, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'ff-tab' + (i === 0 ? ' active' : '');
+        btn.textContent = p.name;
+        btn.addEventListener('click', () => {
+          fig.querySelectorAll('.ff-tab').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          render(p);
+        });
+        tabsEl.appendChild(btn);
+      });
+
+      function render(p: Pattern) {
+        stageEl.innerHTML = `
+          <h5 class="ff-summary">${p.summary}</h5>
+          <div class="ff-chart-wrap"></div>
+          <div class="ff-body">
+            <div class="ff-section">
+              <span class="ff-section-label">root cause</span>
+              <p>${p.rootCause}</p>
+            </div>
+            <div class="ff-section">
+              <span class="ff-section-label">fix</span>
+              <p>${p.fix}</p>
+            </div>
+          </div>
+        `;
+        const chartEl = stageEl.querySelector<HTMLElement>('.ff-chart-wrap')!;
+        buildChart(p, chartEl);
+      }
+
+      render(PATTERNS[0]);
+    });
+  })();
+</script>
+
+<style>
+  .ff-figure {
+    margin: 2.5rem 0; max-width: 880px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-elevated);
+  }
+  .ff-tabs {
+    display: flex; gap: 0.3rem; padding: 0.55rem 0.7rem;
+    background: var(--code-bg);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .ff-figure :global(.ff-tab) {
+    font-family: var(--font-sans); font-size: 0.78rem; padding: 0.35rem 0.7rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+    white-space: nowrap; font-weight: 500;
+  }
+  .ff-figure :global(.ff-tab.active) {
+    color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600;
+  }
+  .ff-stage { padding: 1rem 1.25rem 1.25rem; }
+  .ff-figure :global(.ff-summary) {
+    margin: 0 0 0.8rem;
+    font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600;
+    color: var(--text);
+  }
+  .ff-figure :global(.ff-chart-wrap) {
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 0.5rem;
+    margin-bottom: 0.85rem;
+  }
+  .ff-figure :global(.ff-chart) { width: 100%; height: auto; display: block; }
+  .ff-figure :global(.ff-axis) { stroke: var(--border-strong); stroke-width: 1; }
+  .ff-figure :global(.ff-axis-label) { fill: var(--text-faint); font-size: 10px; font-family: var(--font-sans); }
+  .ff-figure :global(.ff-line) { stroke-width: 2; }
+  .ff-figure :global(.ff-line-healthy) { stroke: #4a8a3d; opacity: 0.85; }
+  .ff-figure :global(.ff-line-healthy-kl) { stroke: #4a8a3d; stroke-dasharray: 4 4; opacity: 0.6; }
+  .ff-figure :global(.ff-line-broken) { stroke: #b85c5c; }
+  .ff-figure :global(.ff-line-broken-kl) { stroke: #b85c5c; stroke-dasharray: 4 4; opacity: 0.7; }
+  .ff-figure :global(.ff-legend) {
+    display: flex; gap: 1rem; margin-top: 0.45rem;
+    font-family: var(--font-sans); font-size: 0.74rem; color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .ff-figure :global(.ff-leg) { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .ff-figure :global(.ff-dot) { display: inline-block; width: 16px; height: 3px; border-radius: 1px; }
+  .ff-figure :global(.ff-dot-h)  { background: #4a8a3d; }
+  .ff-figure :global(.ff-dot-hk) { background: repeating-linear-gradient(to right, #4a8a3d 0 3px, transparent 3px 6px); }
+  .ff-figure :global(.ff-dot-b)  { background: #b85c5c; }
+  .ff-figure :global(.ff-dot-bk) { background: repeating-linear-gradient(to right, #b85c5c 0 3px, transparent 3px 6px); }
+
+  .ff-figure :global(.ff-body) {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+  }
+  @media (max-width: 640px) { .ff-figure :global(.ff-body) { grid-template-columns: 1fr; } }
+  .ff-figure :global(.ff-section) {
+    padding: 0.65rem 0.85rem;
+    background: var(--bg);
+    border-radius: 4px;
+  }
+  .ff-figure :global(.ff-section-label) {
+    font-family: var(--font-sans); font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-faint); font-weight: 600;
+    display: block; margin-bottom: 0.25rem;
+  }
+  .ff-figure :global(.ff-section p) {
+    margin: 0; font-family: var(--font-sans); font-size: 0.85rem;
+    color: var(--text); line-height: 1.55;
+  }
+</style>
