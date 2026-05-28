@@ -1,0 +1,307 @@
+---
+title: "Custom environments and tools for VERL agents"
+description: "How to plug your environment into VERL. Why there's no formal Env class; the @function_tool anatomy; sandboxed code execution; search/browser/RAG tools; tool-level rewards; failure modes."
+pubDate: 2026-06-19
+author: "Ashish"
+tags: ["verl", "rl", "llm", "tools", "agents", "environments"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import ToolAnatomy from '../../components/blog/verl/ToolAnatomy.astro';
+import SandboxArchitecture from '../../components/blog/verl/SandboxArchitecture.astro';
+import ReActVsFunctionCalling from '../../components/blog/verl/ReActVsFunctionCalling.astro';
+import ToolLatencyVsReward from '../../components/blog/verl/ToolLatencyVsReward.astro';
+
+This post is about plugging things into [VERL](https://github.com/verl-project/verl). Code execution sandboxes, search APIs, browsers, retrieval, anything stateful. Less about the AgentLoop machinery (covered in [the multi-turn post](/ashish-ai-blog/blog/verl-multi-turn-agentloop/)) and more about the practical surface — what an environment looks like, what canonical tools are useful, how to wire them in, and where the sharp edges are.
+
+## §1 — Why VERL has no formal Env class
+
+Gym/Gymnasium taught a generation of RL practitioners that environments have a specific interface: `reset()` returns an initial observation, `step(action)` returns `(observation, reward, terminated, truncated, info)`, episode boundaries are explicit. VERL does not adopt this. There is no `Env` base class, no `reset` semantics, no formal observation/action types.
+
+This is a feature, not an omission. Three reasons:
+
+**LLM "environments" don't fit the Gym shape.** A Gym `step()` returns one observation per action. An LLM agent's "action" is generating a multi-token response. The "observation" is what comes back from a tool, which itself is often multiple tokens. Trying to force this into `(obs, reward, done)` introduces artificial boundaries.
+
+**Episodes aren't natural.** In Atari, episode boundaries are obvious (the game ends). In LLM agents, they're conventional — usually "the agent emits a stop signal" or "we hit a turn limit." There's no environmental dynamic forcing the end.
+
+**The right abstraction is the tool, not the env.** A "search environment" is really "a search tool". A "code execution environment" is "a code-running tool with state". Once you have first-class tools, you don't need a separate `Env` concept — environments are just collections of tools.
+
+VERL's choice: provide a `BaseTool` interface with optional per-instance state. If you need env-like semantics (reset, episode boundaries), implement them inside your tool. The framework stays out of your way.
+
+## §2 — Tool anatomy
+
+The `@function_tool` decorator turns a Python function into something an LLM agent can call.
+
+<ToolAnatomy />
+
+The full anatomy:
+
+```python
+from verl.tools import function_tool, ToolResponse
+
+@function_tool
+async def fetch_url(url: str, max_chars: int = 5000) -> ToolResponse:
+    """Fetch a URL and return its text content.
+
+    Args:
+        url: The URL to fetch. Must be HTTPS.
+        max_chars: Maximum characters to return. Defaults to 5000.
+    """
+    if not url.startswith("https://"):
+        return ToolResponse(text="ERROR: Only HTTPS URLs allowed.")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            content = await resp.text()
+            return ToolResponse(text=content[:max_chars])
+```
+
+The decorator inspects:
+- **Function name** → tool name (`fetch_url`).
+- **Parameters with type hints** → tool schema fields (`url: str`, `max_chars: int = 5000`).
+- **Google-style docstring** → description (the one-liner) and per-parameter descriptions (the `Args:` block).
+- **Return type `ToolResponse`** → the framework knows how to embed the result back into the conversation.
+
+The model sees:
+
+```json
+{
+  "name": "fetch_url",
+  "description": "Fetch a URL and return its text content.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {"type": "string", "description": "The URL to fetch. Must be HTTPS."},
+      "max_chars": {"type": "integer", "description": "Maximum characters to return. Defaults to 5000."}
+    },
+    "required": ["url"]
+  }
+}
+```
+
+This is OpenAI tool-call format. Most modern LLMs (Llama, Qwen, DeepSeek, GPT, Claude) understand it.
+
+## §3 — Sandboxed code execution
+
+Running model-generated code is the most common and the most dangerous tool. Three isolation patterns, ordered by strength:
+
+<SandboxArchitecture />
+
+**Pattern A: Docker container per call.** Spin up a fresh container for each `execute()`. Strong isolation, slowest. Useful when you don't trust the code at all and don't need state across calls.
+
+**Pattern B: Persistent sandboxed process.** A long-lived container or microVM per agent loop, with `BaseTool.create()` spinning it up and `release()` tearing it down. The agent's calls go to the same kernel, retaining state (defined functions, imports). Faster than per-call Docker but the isolation lasts the rollout — if a bug in the agent's code corrupts state, subsequent calls within the rollout see the corruption.
+
+**Pattern C: Restricted subprocess (Firejail / gVisor).** Process-level sandboxing instead of full VM. Faster startup. Suitable for trusted code that just needs limited filesystem and network access. Not for untrusted internet-fetched payloads.
+
+A worked example using pattern B:
+
+```python
+class JupyterKernelTool(BaseTool):
+    async def create(self, instance_id):
+        # Start a Jupyter kernel inside a Docker container
+        self._kernels[instance_id] = await spin_up_kernel_container()
+
+    async def execute(self, instance_id, parameters):
+        code = parameters["code"]
+        try:
+            result = await self._kernels[instance_id].execute(
+                code, timeout=10
+            )
+            return ToolResponse(text=result.output[:2000])
+        except KernelTimeout:
+            return ToolResponse(text="ERROR: Code timed out (>10s).")
+
+    async def release(self, instance_id):
+        await self._kernels[instance_id].shutdown()
+```
+
+Three practical notes:
+
+- **Cap output size.** Models sometimes generate code that prints megabytes. Truncate before returning.
+- **Cap execution time.** Without a per-call timeout, one infinite loop blocks an entire rollout.
+- **Resource limits.** Memory, CPU, filesystem — set them all. Otherwise a malicious or buggy generation can DoS your training cluster.
+
+## §4 — Search, browser, retrieval
+
+Three flavors of "give the agent access to information it doesn't have in its weights."
+
+**Search.** Brave Search API, SerpAPI, Bing — the agent emits a query, gets back a ranked list of results (snippets, URLs). Latency is 200-500ms per call. Cost is per-query; budget accordingly. Reward design: usually don't reward "made a search call" — reward correct final answers, let the agent learn when search is useful.
+
+**Browser.** A headless browser (Playwright, Puppeteer) the agent can drive. Higher fidelity than search snippets — the agent can click, scroll, fill forms. Much slower (full page loads, JS execution). Suitable for tasks where the agent's job is web-mediated (form filling, data extraction).
+
+**Retrieval (RAG).** A vector database the agent queries. Local, fast (10-50ms), deterministic. The classic "search but over your own corpus" pattern. Best for tasks where the relevant knowledge is in a known document collection.
+
+All three follow the same `BaseTool` pattern. The differences are:
+- Latency budget (matters for the rollout-vs-training compute balance).
+- Stateful vs stateless (browser has navigation state; search doesn't).
+- Cost per call (search/browser typically paid; RAG self-hosted).
+
+## §5 — Env-style tools (reset, episodes, state)
+
+When you genuinely need environment-like semantics — a game state, a multi-step task with a defined end — implement it inside a tool with per-instance state.
+
+```python
+class GridWorldTool(BaseTool):
+    async def create(self, instance_id):
+        self._states[instance_id] = self._initial_state()  # "reset"
+
+    async def execute(self, instance_id, parameters):
+        action = parameters["action"]  # 'up' / 'down' / 'left' / 'right'
+        state = self._states[instance_id]
+        new_state, reward, done = self._step(state, action)
+        self._states[instance_id] = new_state
+        return ToolResponse(text=self._render(new_state),
+                          metadata={"reward": reward, "done": done})
+
+    async def calc_reward(self, instance_id):
+        # Sum the per-step rewards we accumulated
+        return self._total_rewards[instance_id]
+```
+
+The agent loop calls `execute` once per move; the tool maintains the grid state; the cumulative reward shows up via `calc_reward`. From the LLM's perspective, the grid is just another tool.
+
+The pattern doesn't have native episode-end semantics — the agent decides to stop (by not calling the tool any more, or by emitting a stop signal). For tasks where you want forced termination, your `execute` can return a "game over" message that the agent learns to recognize.
+
+## §6 — Tool-level rewards
+
+Covered briefly in the multi-turn post; expanding here.
+
+`BaseTool.calc_reward(instance_id) → float` is optional. When implemented, the framework adds the returned value to the response-level reward at the end of the rollout. This lets you nudge the policy based on *how* it used the tool, not just the final answer.
+
+<ToolLatencyVsReward />
+
+Useful patterns:
+
+- **Success bonus.** +0.05 for each successful tool call. Helps the policy discover that the tool is useful early.
+- **Error penalty.** -0.02 for each tool-call error. Discourages malformed calls.
+- **Diminishing returns.** Cap the cumulative bonus (e.g., max +0.2). Prevents tool spam.
+- **Tool diversity.** Reward using different tools in the same rollout (not the same one over and over).
+
+The cardinal rule: **tool-level rewards must be small relative to task reward.** If task reward is in [0, 1] and you give +0.5 per tool call, the policy will learn to use the tool five times whether or not it helps. Keep tool rewards to ~1-10% of task reward magnitude.
+
+## §7 — ReAct vs Function Calling vs Toolformer
+
+Three templating patterns for how the agent emits tool calls.
+
+<ReActVsFunctionCalling />
+
+**ReAct (Yao 2022).** The agent alternates "thought" and "action" markers in plain text:
+```
+Thought: I need to compute 24 / 3.
+Action: calculator(24 / 3)
+Observation: 8
+Thought: ...
+```
+Pros: human-readable, no special token tooling needed, models trained on ReAct corpora produce this naturally.
+Cons: parsing is regex-based and fragile; the model can produce malformed actions; reasoning content is interleaved with actions.
+
+**Function Calling (OpenAI-style).** The model produces structured JSON in a designated tool-call field:
+```json
+{"tool_calls": [{"name": "calculator", "arguments": {"expression": "24/3"}}]}
+```
+Pros: structured, parseable, what most modern LLM APIs expect, models can be trained to never produce malformed calls.
+Cons: requires the model and tokenizer to know about a tool-call format (built into most modern chat templates).
+
+**Toolformer.** A specific format involving special tokens (`<tool>...</tool>`). Less common today.
+
+Practical recommendation: use function calling if your model supports it (most do); fall back to ReAct for models that don't. VERL's `ToolAgentLoop` supports both via different template configurations.
+
+## §8 — Common failure modes
+
+Operational issues you will encounter:
+
+**Tool timeouts.** The agent calls a slow tool; the rollout pauses for seconds. Mitigate with per-call timeouts (5-10s for slow tools; 1-2s for fast ones) and asynchronous dispatch so other agent loops keep running.
+
+**Malformed arguments.** The model emits a tool call with the wrong types or missing required fields. Three options: return an error message and let the agent retry; reject the rollout and resample; treat as a 0-reward outcome. Return-and-retry is the most natural.
+
+**Tool abuse.** The agent calls the tool 50 times in a row with slightly different arguments, exploiting per-call rewards or trying to brute-force the answer. Mitigations: cap per-rollout call count; rate-limit the tool; track call patterns and penalize repetition.
+
+**Stateful corruption.** With persistent sandboxes, an agent's bad code can leave the sandbox in a weird state for subsequent calls in the same rollout. Mitigations: snapshot state after `create()`; have `execute()` detect corruption and reset; or just accept the failure and let the rollout end.
+
+**Quota / cost overruns.** External APIs cost real money. Running 1000 search calls per training step adds up fast. Mitigations: caching identical queries; aggressive quotas with hard failures; budget tracking per training run.
+
+## §9 — A complete worked example
+
+The GSM8K calculator agent, end-to-end:
+
+```python
+# tools.py
+from verl.tools import function_tool, ToolResponse
+
+@function_tool
+async def calculator(expression: str) -> ToolResponse:
+    """Evaluate a mathematical expression.
+
+    Args:
+        expression: A Python arithmetic expression, e.g. "(24 - 8) / 2".
+    """
+    # Strict expression evaluation (no imports, no statements)
+    import ast
+    try:
+        tree = ast.parse(expression, mode="eval")
+        # Whitelist of allowed AST nodes
+        allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+                  ast.USub, ast.UAdd)
+        for node in ast.walk(tree):
+            if not isinstance(node, allowed):
+                return ToolResponse(text=f"ERROR: disallowed expression")
+        result = eval(compile(tree, "<expr>", "eval"))
+        return ToolResponse(text=str(result))
+    except Exception as e:
+        return ToolResponse(text=f"ERROR: {e}")
+```
+
+```python
+# reward.py
+import re
+
+ANSWER_RE = re.compile(r"####\s*([-+]?\d+(?:\.\d+)?)")
+
+async def compute_score(data_source, solution_str, ground_truth, extra_info):
+    match = ANSWER_RE.search(solution_str)
+    if not match:
+        return {"score": 0.0, "extra_info": {"reason": "no_answer_marker"}}
+    try:
+        return {"score": float(abs(float(match.group(1)) - float(ground_truth)) < 1e-3)}
+    except ValueError:
+        return {"score": 0.0, "extra_info": {"reason": "unparseable"}}
+```
+
+```yaml
+# config.yaml (simplified)
+data:
+  train_batch_size: 64
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+rollout:
+  n: 8
+  agent_loop:
+    type: tool_agent
+    tools_module: tools  # registers @function_tool decorated functions
+custom_reward_function:
+  path: reward:compute_score
+actor:
+  cliprange_low: 0.2
+  cliprange_high: 0.28
+  loss_agg_mode: token-mean
+```
+
+This is everything. Three files, ~80 lines total. The agent learns to call the calculator correctly, the verifier scores final answers, GRPO with DAPO-style tweaks does the rest.
+
+## §10 — A mental model
+
+VERL's stance: tools are the integration surface. There is no formal `Env`; there is `BaseTool` with four lifecycle methods. Sandboxing, state management, multi-step semantics — all live inside your tool implementations, not in the framework.
+
+This works because the framework doesn't pretend to be a general-purpose RL framework. It is specifically an LLM RL framework. The "environments" your agents interact with are almost always computational (code, search, retrieval, formal tools) rather than physical or simulated dynamics. Computational environments are *just APIs*, and the right abstraction for an API is a function — which is exactly what `@function_tool` makes them.
+
+The cost is that there's no shared abstraction for "an environment with reset semantics and well-defined episodes." If you need that, you build it yourself, inside a tool, with per-instance state. The benefit is that the surface area you have to learn is small: one decorator, one base class, four methods.
+
+The [next post in this series](/ashish-ai-blog/blog/verl-backends-internals/) opens the box on the backends — vLLM, SGLang, FSDP, Megatron — that make all of this run efficiently at scale.
+
+## References
+
+- Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., Cao, Y. (2022). *ReAct: Synergizing Reasoning and Acting in Language Models.* [arXiv:2210.03629](https://arxiv.org/abs/2210.03629).
+- Schick, T., Dwivedi-Yu, J., Dessì, R., Raileanu, R., Lomeli, M., Zettlemoyer, L., Cancedda, N., Scialom, T. (2023). *Toolformer.* [arXiv:2302.04761](https://arxiv.org/abs/2302.04761).
+- [Firejail](https://firejail.wordpress.com/), [gVisor](https://gvisor.dev/), [Playwright](https://playwright.dev/), [Browser-Use](https://github.com/browser-use/browser-use).
+- [VERL tools source](https://github.com/verl-project/verl/tree/main/verl/tools).

@@ -1,0 +1,213 @@
+---
+// Viz — Tool latency vs reward bonus. Slider for tool latency (ms) and for
+// per-call reward bonus. Show: training throughput vs gradient pull of the
+// reward bonus.
+---
+
+<figure class="tlr-figure" aria-label="Tool latency vs reward tradeoff">
+  <div class="tlr-controls">
+    <label class="tlr-slider">
+      <span class="tlr-label">tool latency (ms)</span>
+      <input type="range" min="10" max="2000" step="10" value="200" data-control="latency" />
+      <output data-readout="latency">200</output>
+    </label>
+    <label class="tlr-slider">
+      <span class="tlr-label">per-call reward bonus</span>
+      <input type="range" min="0" max="50" step="1" value="5" data-control="bonus" />
+      <output data-readout="bonus">0.05</output>
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="tlr-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <text x="20" y="40" class="tlr-row-label">rollout time per call</text>
+    <text x="20" y="120" class="tlr-row-label">tool calls per rollout</text>
+    <text x="20" y="200" class="tlr-row-label">cumulative tool bonus</text>
+
+    <g data-region="lat-bar"></g>
+    <g data-region="calls-bar"></g>
+    <g data-region="bonus-bar"></g>
+
+    <text x="380" y="265" class="tlr-axis-label" text-anchor="middle">three views of the latency × bonus tradeoff</text>
+  </svg>
+
+  <div class="tlr-readouts">
+    <div class="tlr-stat">
+      <span class="tlr-label">est. rollout duration</span>
+      <strong data-readout="rollout">2.0s</strong>
+    </div>
+    <div class="tlr-stat">
+      <span class="tlr-label">bonus / task reward ratio</span>
+      <strong data-readout="ratio">25%</strong>
+    </div>
+    <div class="tlr-stat">
+      <span class="tlr-label">verdict</span>
+      <strong data-readout="verdict">balanced</strong>
+    </div>
+  </div>
+
+  <figcaption>
+    Tool latency multiplies with tool calls per rollout. Per-call reward bonus accumulates the
+    same way. The danger zone: slow tools with large bonuses make the policy call tools more
+    (because the gradient rewards it), which makes rollouts slower, which makes training slower.
+    Keep tool bonus small (1-10% of task reward) and tool latency low.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    document.querySelectorAll<HTMLElement>('.tlr-figure').forEach((fig) => {
+      const latInput = fig.querySelector<HTMLInputElement>('[data-control="latency"]')!;
+      const bonusInput = fig.querySelector<HTMLInputElement>('[data-control="bonus"]')!;
+      const latReadout = fig.querySelector<HTMLOutputElement>('[data-readout="latency"]')!;
+      const bonusReadout = fig.querySelector<HTMLOutputElement>('[data-readout="bonus"]')!;
+      const latBarG = fig.querySelector<SVGGElement>('[data-region="lat-bar"]')!;
+      const callsBarG = fig.querySelector<SVGGElement>('[data-region="calls-bar"]')!;
+      const bonusBarG = fig.querySelector<SVGGElement>('[data-region="bonus-bar"]')!;
+      const rolloutEl = fig.querySelector<HTMLElement>('[data-readout="rollout"]')!;
+      const ratioEl = fig.querySelector<HTMLElement>('[data-readout="ratio"]')!;
+      const verdictEl = fig.querySelector<HTMLElement>('[data-readout="verdict"]')!;
+
+      function render() {
+        const lat = parseInt(latInput.value, 10);
+        const bonusVal = parseInt(bonusInput.value, 10) / 100;
+        latReadout.value = String(lat);
+        bonusReadout.value = bonusVal.toFixed(2);
+
+        // Estimate how many tool calls the policy makes per rollout: scales with bonus
+        const callsPerRollout = Math.min(15, 2 + bonusVal * 50);
+        const rolloutMs = callsPerRollout * lat + 500;  // 500ms for generation
+        const totalBonus = callsPerRollout * bonusVal;
+        const taskReward = 1.0;
+        const ratio = totalBonus / taskReward;
+
+        // Update bars
+        latBarG.replaceChildren();
+        callsBarG.replaceChildren();
+        bonusBarG.replaceChildren();
+
+        const X_START = 180;
+        const X_END = 700;
+        const BAR_H = 22;
+
+        // Latency bar: log scale 0-2000ms maps to 0-100%
+        const latPct = Math.min(1, lat / 2000);
+        el('rect', { x: X_START, y: 30, width: latPct * (X_END - X_START), height: BAR_H, class: 'tlr-bar tlr-bar-lat' }, latBarG);
+        el('text', { x: X_START + latPct * (X_END - X_START) + 8, y: 30 + BAR_H/2 + 4, class: 'tlr-bar-value' }, latBarG).textContent = `${lat}ms`;
+
+        // Calls bar: up to 15
+        const callsPct = Math.min(1, callsPerRollout / 15);
+        el('rect', { x: X_START, y: 110, width: callsPct * (X_END - X_START), height: BAR_H, class: 'tlr-bar tlr-bar-calls' }, callsBarG);
+        el('text', { x: X_START + callsPct * (X_END - X_START) + 8, y: 110 + BAR_H/2 + 4, class: 'tlr-bar-value' }, callsBarG).textContent = `${callsPerRollout.toFixed(1)} calls`;
+
+        // Cumulative bonus: 0-0.5
+        const bonusPct = Math.min(1, totalBonus / 1.0);
+        const cls = totalBonus > 0.3 ? 'tlr-bar tlr-bar-bonus-danger' : 'tlr-bar tlr-bar-bonus';
+        el('rect', { x: X_START, y: 190, width: bonusPct * (X_END - X_START), height: BAR_H, class: cls }, bonusBarG);
+        el('text', { x: X_START + bonusPct * (X_END - X_START) + 8, y: 190 + BAR_H/2 + 4, class: 'tlr-bar-value' }, bonusBarG).textContent = `+${totalBonus.toFixed(2)}`;
+
+        rolloutEl.textContent = (rolloutMs / 1000).toFixed(1) + 's';
+        ratioEl.textContent = (ratio * 100).toFixed(0) + '%';
+
+        let verdict = 'balanced';
+        let verdictCls = '';
+        if (ratio > 0.3) { verdict = 'tool reward will dominate gradient'; verdictCls = 'tlr-warn'; }
+        else if (lat > 500 && callsPerRollout > 5) { verdict = 'slow rollouts'; verdictCls = 'tlr-warn'; }
+        else if (ratio < 0.05) { verdict = 'tool reward effectively zero'; verdictCls = 'tlr-mute'; }
+        verdictEl.textContent = verdict;
+        verdictEl.className = verdictCls;
+      }
+
+      latInput.addEventListener('input', render);
+      bonusInput.addEventListener('input', render);
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .tlr-figure { margin: 2.5rem 0; max-width: 880px; }
+  .tlr-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+  }
+  @media (max-width: 640px) { .tlr-controls { grid-template-columns: 1fr; } }
+  .tlr-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.55rem;
+    align-items: center;
+  }
+  .tlr-label {
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .tlr-slider input[type="range"] { accent-color: var(--accent); }
+  .tlr-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 3rem;
+    text-align: right;
+  }
+  .tlr-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .tlr-row-label {
+    fill: var(--text);
+    font-size: 11.5px;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-weight: 600;
+  }
+  .tlr-axis-label { fill: var(--text-faint); font-size: 10px; font-family: var(--font-sans); }
+  .tlr-figure :global(.tlr-bar) { transition: width 300ms ease; }
+  .tlr-figure :global(.tlr-bar-lat) { fill: #d08a3e; opacity: 0.85; }
+  .tlr-figure :global(.tlr-bar-calls) { fill: #4a78c2; opacity: 0.85; }
+  .tlr-figure :global(.tlr-bar-bonus) { fill: #4a8a3d; opacity: 0.85; }
+  .tlr-figure :global(.tlr-bar-bonus-danger) { fill: #b85c5c; opacity: 0.9; }
+  .tlr-figure :global(.tlr-bar-value) {
+    fill: var(--text);
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+
+  .tlr-readouts {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.6rem;
+    margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .tlr-readouts { grid-template-columns: 1fr; } }
+  .tlr-stat {
+    padding: 0.55rem 0.8rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .tlr-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--text);
+  }
+  .tlr-stat strong.tlr-warn { color: #b85c5c; }
+  .tlr-stat strong.tlr-mute { color: var(--text-faint); }
+</style>

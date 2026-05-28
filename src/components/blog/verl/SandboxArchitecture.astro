@@ -1,0 +1,229 @@
+---
+// Viz — Sandbox architecture comparison. Three patterns side-by-side with
+// security/speed/state tradeoff meters.
+---
+
+<figure class="sa-figure" aria-label="Sandbox architecture comparison">
+  <div class="sa-tabs" role="tablist">
+    <button type="button" role="tab" class="sa-tab active" data-mode="docker-per-call" aria-selected="true">Docker per call</button>
+    <button type="button" role="tab" class="sa-tab"        data-mode="persistent"      aria-selected="false">Persistent sandbox</button>
+    <button type="button" role="tab" class="sa-tab"        data-mode="restricted"      aria-selected="false">Restricted subprocess</button>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="sa-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="diagram"></g>
+  </svg>
+
+  <div class="sa-meters">
+    <div class="sa-meter">
+      <span class="sa-meter-label">isolation</span>
+      <div class="sa-bar"><div class="sa-bar-fill" data-fill="isolation"></div></div>
+    </div>
+    <div class="sa-meter">
+      <span class="sa-meter-label">startup speed</span>
+      <div class="sa-bar"><div class="sa-bar-fill" data-fill="speed"></div></div>
+    </div>
+    <div class="sa-meter">
+      <span class="sa-meter-label">state retention</span>
+      <div class="sa-bar"><div class="sa-bar-fill" data-fill="state"></div></div>
+    </div>
+  </div>
+
+  <div class="sa-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    Three patterns for sandboxing model-generated code. Docker-per-call gives strongest isolation,
+    slowest startup, no state. Persistent sandboxes retain Jupyter-style state across calls in
+    one rollout. Restricted subprocesses are fastest but only suitable for trusted code.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    function box(parent: SVGGElement, x: number, y: number, w: number, h: number, label: string, sub: string, klass = '') {
+      const g = el('g', { class: `sa-box ${klass}`, transform: `translate(${x} ${y})` }, parent) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 6, class: 'sa-rect' }, g);
+      el('text', { x: w / 2, y: h / 2 - 4, class: 'sa-box-label', 'text-anchor': 'middle' }, g).textContent = label;
+      if (sub) el('text', { x: w / 2, y: h / 2 + 12, class: 'sa-box-sub', 'text-anchor': 'middle' }, g).textContent = sub;
+      return g;
+    }
+    function arrow(parent: SVGGElement, x1: number, y1: number, x2: number, y2: number, label?: string) {
+      el('path', { d: `M ${x1} ${y1} L ${x2} ${y2}`, class: 'sa-arrow', fill: 'none', 'marker-end': 'url(#sa-arr)' }, parent);
+      if (label) el('text', { x: (x1+x2)/2 + 4, y: (y1+y2)/2 - 6, class: 'sa-arrow-label' }, parent).textContent = label;
+    }
+
+    const SPECS = {
+      'docker-per-call': {
+        meters: { isolation: 95, speed: 20, state: 5 },
+        callout: 'Each tool call spins up a fresh Docker container, runs the code, and destroys the container. Maximum isolation — a malicious payload can do nothing persistent. The startup cost (often 200-500ms) makes this unsuitable for high-frequency tools.',
+        render: (g: SVGGElement) => {
+          box(g, 30, 80, 130, 80, 'agent loop', 'execute()', 'sa-box-agent');
+          // 3 ephemeral containers, then poof
+          for (let i = 0; i < 3; i++) {
+            box(g, 220 + i * 150, 80, 120, 80, `Docker ${i+1}`, 'spin up → kill', 'sa-box-container');
+          }
+          arrow(g, 160, 120, 220, 120, 'call 1');
+          arrow(g, 340, 120, 370, 120, '');
+          arrow(g, 490, 120, 520, 120, '');
+          el('text', { x: 380, y: 200, class: 'sa-tagline', 'text-anchor': 'middle' }, g).textContent = '~200-500ms per call · fresh state · throwaway';
+        },
+      },
+      persistent: {
+        meters: { isolation: 70, speed: 80, state: 95 },
+        callout: 'One long-lived container per agent loop. BaseTool.create() spins it up; execute() reuses it; release() tears it down. State (defined functions, imports) persists across calls — the model can build on previous work. The isolation lasts the rollout.',
+        render: (g: SVGGElement) => {
+          box(g, 30, 100, 130, 60, 'agent loop', 'per instance', 'sa-box-agent');
+          // One big persistent container with 3 execute arrows back
+          box(g, 240, 60, 380, 140, 'persistent Docker container', 'state: defined fns, imports, vars', 'sa-box-container-long');
+          arrow(g, 160, 110, 240, 110, 'create()');
+          arrow(g, 160, 130, 240, 130, 'execute() × N');
+          arrow(g, 160, 150, 240, 150, 'release()');
+          el('text', { x: 430, y: 240, class: 'sa-tagline', 'text-anchor': 'middle' }, g).textContent = '~5ms per call · stateful · per-rollout lifecycle';
+        },
+      },
+      restricted: {
+        meters: { isolation: 50, speed: 95, state: 30 },
+        callout: 'A regular subprocess with Firejail or gVisor restrictions: limited filesystem access, network blocked, syscall whitelist. Fastest startup, weakest isolation. Suitable for trusted code that needs lightweight sandboxing — not for arbitrary internet-fetched payloads.',
+        render: (g: SVGGElement) => {
+          box(g, 30, 100, 130, 60, 'agent loop', 'execute()', 'sa-box-agent');
+          box(g, 240, 80, 200, 100, 'Firejail / gVisor', 'syscall whitelist', 'sa-box-restricted');
+          box(g, 480, 80, 200, 100, 'subprocess', 'python -c ...', 'sa-box-container');
+          arrow(g, 160, 130, 240, 130, 'call');
+          arrow(g, 440, 130, 480, 130, '');
+          el('text', { x: 380, y: 220, class: 'sa-tagline', 'text-anchor': 'middle' }, g).textContent = '~50ms per call · partial isolation · trusted code only';
+        },
+      },
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.sa-figure').forEach((fig) => {
+      const diagramG = fig.querySelector<SVGGElement>('[data-region="diagram"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.sa-tab'));
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const isoFill = fig.querySelector<HTMLElement>('[data-fill="isolation"]')!;
+      const speedFill = fig.querySelector<HTMLElement>('[data-fill="speed"]')!;
+      const stateFill = fig.querySelector<HTMLElement>('[data-fill="state"]')!;
+
+      // Ensure marker exists
+      if (!fig.querySelector('#sa-arr')) {
+        const svg = fig.querySelector('svg')!;
+        const defs = document.createElementNS(NS, 'defs');
+        const marker = document.createElementNS(NS, 'marker');
+        marker.setAttribute('id', 'sa-arr');
+        marker.setAttribute('viewBox', '0 0 10 10');
+        marker.setAttribute('refX', '9');
+        marker.setAttribute('refY', '5');
+        marker.setAttribute('markerWidth', '6');
+        marker.setAttribute('markerHeight', '6');
+        marker.setAttribute('orient', 'auto');
+        const path = document.createElementNS(NS, 'path');
+        path.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+        path.setAttribute('fill', 'var(--text-muted)');
+        marker.appendChild(path);
+        defs.appendChild(marker);
+        svg.insertBefore(defs, svg.firstChild);
+      }
+
+      function show(mode: keyof typeof SPECS) {
+        const spec = SPECS[mode];
+        diagramG.replaceChildren();
+        spec.render(diagramG);
+        calloutEl.textContent = spec.callout;
+        isoFill.style.width = `${spec.meters.isolation}%`;
+        speedFill.style.width = `${spec.meters.speed}%`;
+        stateFill.style.width = `${spec.meters.state}%`;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show(t.getAttribute('data-mode') as keyof typeof SPECS);
+        });
+      });
+      show('docker-per-call');
+    });
+  })();
+</script>
+
+<style>
+  .sa-figure { margin: 2.5rem 0; max-width: 880px; }
+  .sa-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .sa-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .sa-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .sa-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .sa-figure :global(.sa-rect) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+  }
+  .sa-figure :global(.sa-box-agent .sa-rect) { fill: #dde5f3; stroke: #4a78c2; }
+  .sa-figure :global(.sa-box-container .sa-rect) { fill: #f5e0c3; stroke: #d08a3e; }
+  .sa-figure :global(.sa-box-container-long .sa-rect) { fill: #d8ecd1; stroke: #4a8a3d; }
+  .sa-figure :global(.sa-box-restricted .sa-rect) { fill: #e3d9f3; stroke: #6b4ab8; }
+  .sa-figure :global(.sa-box-label) { fill: var(--text); font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+  .sa-figure :global(.sa-box-sub) { fill: var(--text-muted); font-size: 10.5px; }
+  .sa-figure :global(.sa-arrow) { stroke: var(--text-muted); stroke-width: 1.4; }
+  .sa-figure :global(.sa-arrow-label) { fill: var(--text-faint); font-size: 10px; font-family: var(--font-mono); }
+  .sa-figure :global(.sa-tagline) { fill: var(--text-faint); font-size: 11px; font-family: var(--font-mono); font-style: italic; }
+
+  .sa-meters {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.85rem;
+    margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .sa-meters { grid-template-columns: 1fr; } }
+  .sa-meter { display: grid; gap: 0.25rem; }
+  .sa-meter-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .sa-bar {
+    height: 10px;
+    background: var(--code-bg);
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .sa-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 50%;
+    transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.85;
+  }
+  .sa-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .sa-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

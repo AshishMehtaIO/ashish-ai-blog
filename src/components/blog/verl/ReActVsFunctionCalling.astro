@@ -1,0 +1,232 @@
+---
+// Viz — ReAct vs Function Calling templating patterns. Side-by-side.
+---
+
+<figure class="rfc-figure" aria-label="ReAct vs Function Calling">
+  <div class="rfc-tabs" role="tablist">
+    <button type="button" role="tab" class="rfc-tab active" data-mode="react" aria-selected="true">ReAct</button>
+    <button type="button" role="tab" class="rfc-tab"        data-mode="fc"    aria-selected="false">Function Calling</button>
+    <button type="button" role="tab" class="rfc-tab"        data-mode="toolformer" aria-selected="false">Toolformer</button>
+  </div>
+
+  <div class="rfc-grid">
+    <div class="rfc-pane">
+      <h5 class="rfc-pane-label">model output</h5>
+      <pre class="rfc-code" data-region="output"></pre>
+    </div>
+    <div class="rfc-pane">
+      <h5 class="rfc-pane-label">parsing</h5>
+      <pre class="rfc-code" data-region="parsing"></pre>
+    </div>
+  </div>
+
+  <div class="rfc-pros-cons">
+    <div class="rfc-col">
+      <h6 class="rfc-col-label">pros</h6>
+      <ul data-region="pros"></ul>
+    </div>
+    <div class="rfc-col">
+      <h6 class="rfc-col-label">cons</h6>
+      <ul data-region="cons"></ul>
+    </div>
+  </div>
+
+  <figcaption>
+    Three patterns for how an agent emits a tool call. ReAct is text-with-markers (human
+    readable, regex-parsed). Function Calling is structured JSON (machine readable, what most
+    modern chat APIs use). Toolformer uses special tokens (less common today).
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const SPECS = {
+      react: {
+        output: `Thought: I need to compute 24 / 3.
+Action: calculator
+Action Input: 24 / 3
+Observation: 8
+Thought: Now I need to subtract 8 and 2 from 24.
+Action: calculator
+Action Input: 24 - 8 - 2
+Observation: 14
+Thought: Maria has 14 apples left.
+Final Answer: 14`,
+        parsing: `# Regex-based extraction
+action_match = re.search(
+    r"Action: (\\w+)\\n"
+    r"Action Input: (.+)",
+    output
+)
+if action_match:
+    tool_name = action_match.group(1)
+    tool_args = action_match.group(2)`,
+        pros: [
+          'Human-readable in logs',
+          'No special tokens needed',
+          'Models trained on ReAct produce naturally',
+        ],
+        cons: [
+          'Regex parsing is fragile',
+          'Model can produce malformed actions',
+          'Reasoning interleaved with actions',
+        ],
+      },
+      fc: {
+        output: `{
+  "role": "assistant",
+  "content": "I'll compute 24/3 first.",
+  "tool_calls": [
+    {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+        "name": "calculator",
+        "arguments": "{\\"expression\\": \\"24 / 3\\"}"
+      }
+    }
+  ]
+}`,
+        parsing: `# Structured field access (no regex)
+for call in response.tool_calls:
+    tool_name = call.function.name
+    tool_args = json.loads(call.function.arguments)`,
+        pros: [
+          'Machine-parseable, robust',
+          'Modern chat APIs use this',
+          'Models can be trained to never emit malformed calls',
+        ],
+        cons: [
+          'Requires model + tokenizer support',
+          'Slightly more setup',
+          'Template differences between models',
+        ],
+      },
+      toolformer: {
+        output: `Maria gave 24/3 = <tool>calculator(24/3)</tool> 8 apples.
+Then she ate 2, so 24 - 8 - 2 = <tool>calculator(24 - 8 - 2)</tool> 14.
+The answer is 14.`,
+        parsing: `# Extract tool tags from inline text
+matches = re.finditer(r"<tool>(.+?)</tool>", output)
+for m in matches:
+    call_str = m.group(1)  # "calculator(24/3)"
+    tool_name, args = parse_call(call_str)`,
+        pros: [
+          'Tools inline with reasoning',
+          'Special tokens unambiguous',
+        ],
+        cons: [
+          'Requires custom tokenizer (extra tokens)',
+          'Less standard than function calling',
+          'Models need specific training',
+        ],
+      },
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.rfc-figure').forEach((fig) => {
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.rfc-tab'));
+      const outputEl = fig.querySelector<HTMLElement>('[data-region="output"]')!;
+      const parsingEl = fig.querySelector<HTMLElement>('[data-region="parsing"]')!;
+      const prosUl = fig.querySelector<HTMLUListElement>('[data-region="pros"]')!;
+      const consUl = fig.querySelector<HTMLUListElement>('[data-region="cons"]')!;
+
+      function show(mode: keyof typeof SPECS) {
+        const s = SPECS[mode];
+        outputEl.textContent = s.output;
+        parsingEl.textContent = s.parsing;
+        prosUl.replaceChildren();
+        consUl.replaceChildren();
+        s.pros.forEach((t) => { const li = document.createElement('li'); li.textContent = t; prosUl.appendChild(li); });
+        s.cons.forEach((t) => { const li = document.createElement('li'); li.textContent = t; consUl.appendChild(li); });
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show(t.getAttribute('data-mode') as keyof typeof SPECS);
+        });
+      });
+      show('react');
+    });
+  })();
+</script>
+
+<style>
+  .rfc-figure { margin: 2.5rem 0; max-width: 880px; }
+  .rfc-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .rfc-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+  }
+  .rfc-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+  .rfc-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.85rem;
+  }
+  @media (max-width: 700px) { .rfc-grid { grid-template-columns: 1fr; } }
+
+  .rfc-pane {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.85rem;
+  }
+  .rfc-pane-label {
+    margin: 0 0 0.4rem;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .rfc-code {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    color: var(--text);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+
+  .rfc-pros-cons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elevated);
+  }
+  @media (max-width: 640px) { .rfc-pros-cons { grid-template-columns: 1fr; } }
+  .rfc-col-label {
+    margin: 0 0 0.4rem;
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .rfc-col:nth-child(1) .rfc-col-label { color: #4a8a3d; }
+  .rfc-col:nth-child(2) .rfc-col-label { color: #b85c5c; }
+  .rfc-col ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-family: var(--font-sans);
+    font-size: 0.84rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .rfc-col li { margin-bottom: 0.25rem; }
+</style>
