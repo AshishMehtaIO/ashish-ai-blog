@@ -1,6 +1,6 @@
 ---
-title: "Reward functions in VERL: rule, model, composite, and PRM"
-description: "Where the learning signal comes from. Rule-based scoring, learned reward models, composite shaping, the five named reward-hacking patterns, and how to layer a PRM on top of VERL when the framework doesn't ship one."
+title: "Reward design is the hard part of LLM RL"
+description: "Where the learning signal comes from, and why it's the most error-prone surface in an LLM RL system. Rule-based scoring, learned reward models, composition, the five reward-hacking patterns, and process rewards — with VERL as the worked example."
 pubDate: 2026-05-24
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf", "rewards", "prm"]
@@ -24,7 +24,7 @@ Three properties of LLM rewards make them especially fragile:
 
 **The action space is huge.** Each token is a choice from a 100k+ vocabulary. The policy will find sequences you did not anticipate. If your rule-based verifier accepts the answer `"42"` but not `"42.0"` or `"forty-two"`, the policy will learn to produce specifically `"42"`. If your verifier accepts an answer hidden inside a sentence, the policy will learn to hide answers inside sentences.
 
-**The reward is almost always sparse.** Most LLM RL tasks have one terminal scalar reward per response — "right" or "wrong" on the final answer. The policy has to credit-assign that single signal across thousands of tokens. This is the algorithm's job (see [the algorithm zoo post](/ashish-ai-blog/blog/verl-algorithm-zoo/)) but it amplifies any noise or bias in the reward itself.
+**The reward is almost always sparse.** Most LLM RL tasks have one terminal scalar reward per response — "right" or "wrong" on the final answer. The policy has to credit-assign that single signal across thousands of tokens. This is the algorithm's job (see [the algorithm zoo post](/ashish-ai-blog/blog/llm-rl-algorithm-interface/)) but it amplifies any noise or bias in the reward itself.
 
 **The reference policy matters.** Unlike Atari or MuJoCo, the starting policy is already a competent language model. We do not want to deviate so far that we lose that competence. The KL penalty against the SFT reference is part of the reward signal in most LLM RL setups, and the choice of how much to weigh it is one of the most sensitive knobs in training.
 
@@ -140,7 +140,7 @@ async def compute_score(data_source, solution_str, ground_truth, extra_info):
 
 Two things to internalize:
 
-- **Sandboxing matters.** Don't run model-generated code inside your training loop without isolation. Use Docker, Firejail, gVisor, or a microVM. We cover the options in the [environments and tools post](/ashish-ai-blog/blog/verl-environments-tools/).
+- **Sandboxing matters.** Don't run model-generated code inside your training loop without isolation. Use Docker, Firejail, gVisor, or a microVM. We cover the options in the [environments and tools post](/ashish-ai-blog/blog/llm-rl-environments/).
 - **Latency matters.** If the reward function takes 5 seconds per response and you're scoring 256 responses per iteration, you've added 20+ minutes of wall time per training step. Parallelize, cap timeouts aggressively, or move the heavy work into a separate service.
 
 ## §4 — Composing rewards
@@ -209,7 +209,7 @@ reward_model:
   micro_batch_size_per_gpu: 8
 ```
 
-The RM worker shares GPUs with the rest of the cluster (or runs on its own pool — see the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/)). During training, every batch of responses gets a forward pass through the RM, and the resulting scalar is added to `token_level_scores`.
+The RM worker shares GPUs with the rest of the cluster (or runs on its own pool — see the [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/)). During training, every batch of responses gets a forward pass through the RM, and the resulting scalar is added to `token_level_scores`.
 
 ### Generative reward models (LLM-as-judge)
 
@@ -266,7 +266,7 @@ The pattern across all five: **rewards are specifications, and your specificatio
 
 The KL constraint to the reference policy is the only "reward" in most LLM RL runs that is not really about the task. It exists to keep the policy linguistically grounded.
 
-There are two places it can live (covered in detail in [the algorithm zoo post](/ashish-ai-blog/blog/verl-algorithm-zoo/)):
+There are two places it can live (covered in detail in [the algorithm zoo post](/ashish-ai-blog/blog/llm-rl-algorithm-interface/)):
 
 - **In-reward** (`algorithm.use_kl_in_reward: true`): subtract β · KL(π_θ || π_ref) from the per-token reward. The KL is part of the reward signal that gets credit-assigned by the advantage estimator.
 - **In-loss**: add β · KL as an explicit term in the actor loss, bypassing the advantage estimator.

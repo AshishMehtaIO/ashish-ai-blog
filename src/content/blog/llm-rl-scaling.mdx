@@ -1,6 +1,6 @@
 ---
-title: "Scaling VERL: parameter resharding, async rollout, and what changes at 70B+"
-description: "The scaling story for LLM RL. Where the bottleneck migrates as model size grows, the parameter resharding internals, one-step-off vs fully async, communication patterns, memory budgeting, and three concrete case studies."
+title: "Where LLM RL bottlenecks move as you scale"
+description: "The scaling story for LLM RL: how the bottleneck migrates from compute to memory to communication as model size grows, parameter resharding internals, one-step-off vs fully async, and what changes at 70B+. VERL as the worked example."
 pubDate: 2026-05-28
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "scaling", "async", "performance"]
@@ -15,7 +15,7 @@ import CriticalPath from '../../components/blog/verl/CriticalPath.astro';
 
 The [HybridFlow paper](https://arxiv.org/abs/2409.19256) reports 1.53× to 20.57× throughput improvements over comparable systems. That's a 13× range. This post is about *why* the range is so wide — what changes between the workload that gets 1.5× and the one that gets 20×. Spoiler: it's about which phase dominates, how often weights have to move, and whether you can hide compute behind I/O.
 
-We walk the scaling story for [VERL](https://github.com/verl-project/verl): the bottleneck migration from 7B to 405B, the parameter resharding internals, the staleness mathematics of async rollout, NCCL communication patterns, memory budgeting at scale, profiling tooling, and three concrete case studies.<Sidenote id="sn-prereqs">Assumes you've seen FSDP/Megatron and vLLM/SGLang at a surface level — [the backends post](/ashish-ai-blog/blog/verl-backends-internals/) is the reference if you haven't. Otherwise self-contained.</Sidenote>
+We walk the scaling story for [VERL](https://github.com/verl-project/verl): the bottleneck migration from 7B to 405B, the parameter resharding internals, the staleness mathematics of async rollout, NCCL communication patterns, memory budgeting at scale, profiling tooling, and three concrete case studies.<Sidenote id="sn-prereqs">Assumes you've seen FSDP/Megatron and vLLM/SGLang at a surface level — [the backends post](/ashish-ai-blog/blog/llm-rl-engines/) is the reference if you haven't. Otherwise self-contained.</Sidenote>
 
 ## §1 — The bottleneck migrates with scale
 
@@ -56,7 +56,7 @@ The paper reports 55% average reduction in transfer time after the in-flight res
 
 ## §3 — One-step-off async: the staleness math
 
-One-step-off async overlaps rollout for batch $t+1$ with training on batch $t$. After both complete, the new weights transfer and the cycle repeats. We covered the timing structure in [the intro post](/ashish-ai-blog/blog/verl-mental-model/#async-rollout); here we look at why the staleness is OK.
+One-step-off async overlaps rollout for batch $t+1$ with training on batch $t$. After both complete, the new weights transfer and the cycle repeats. We covered the timing structure in [the intro post](/ashish-ai-blog/blog/llm-rl-systems-overview/#async-rollout); here we look at why the staleness is OK.
 
 <AsyncStaleness />
 
@@ -207,7 +207,7 @@ VERL gives you the tools to apply each response: FSDP and Megatron for training 
 
 Most setups don't need to think this hard. Below 70B, the defaults work. At 70B+, you start needing to read the profiler. At 405B+, you're solving a different problem — one of distributed systems engineering as much as RL.
 
-The [next and final post in this series](/ashish-ai-blog/blog/verl-debugging-evaluation/) covers the operational side: what to log during training, how to recognize failure modes from their fingerprints on metrics dashboards, and how to debug a training run that's underperforming.
+The [next and final post in this series](/ashish-ai-blog/blog/llm-rl-observability/) covers the operational side: what to log during training, how to recognize failure modes from their fingerprints on metrics dashboards, and how to debug a training run that's underperforming.
 
 ## References
 

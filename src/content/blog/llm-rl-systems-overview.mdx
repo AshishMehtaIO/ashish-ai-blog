@@ -1,6 +1,6 @@
 ---
-title: "A mental model of VERL"
-description: "How an open-source LLM RL framework actually works — single-controller orchestration, the unifying advantage estimator, multi-turn agent loops, and where it strains today."
+title: "How an LLM RL system fits together"
+description: "LLM RL is a distributed-systems problem before it's an algorithms problem. A top-down tour of the moving parts — single-controller orchestration, the unifying advantage estimator, multi-turn agent loops — with VERL as the worked example."
 pubDate: 2026-05-22
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf"]
@@ -19,7 +19,7 @@ import IterationWalkthrough from '../../components/blog/verl/IterationWalkthroug
 import MultiTurnRolloutScrubber from '../../components/blog/verl/MultiTurnRolloutScrubber.astro';
 import AsyncRolloutGantt from '../../components/blog/verl/AsyncRolloutGantt.astro';
 
-[VERL](https://github.com/verl-project/verl) is an open-source library for doing reinforcement learning on large language models. It is the engine behind a lot of recent RL-trained models, the reference implementation for [HybridFlow](https://arxiv.org/abs/2409.19256), and one of the better places to look if you want to understand how modern LLM RL training actually fits together. This post is a top-down tour.
+Reinforcement learning on large language models is a distributed-systems problem before it is an algorithms problem. A framework has to coordinate a training engine, an inference engine, several model copies, and a reward signal — all cycling every iteration, all competing for the same GPUs. There is a small design space of answers to *how*, and this post walks it top-down. We use [VERL](https://github.com/verl-project/verl) — the reference implementation of [HybridFlow](https://arxiv.org/abs/2409.19256) — as the worked example throughout, because it makes most of the canonical design choices and makes them legibly.
 
 The aim is not a tutorial. The aim is a *mental model* — a picture of VERL's moving parts complete enough that, after reading, you can open the repo, find the function you care about, and reason about what would happen if you changed it. Later posts in this series will go deeper into the parts that deserve their own essay.
 

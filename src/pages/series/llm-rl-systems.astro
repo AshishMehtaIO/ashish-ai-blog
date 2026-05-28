@@ -10,58 +10,58 @@ const series = {
 
 const posts = [
   {
-    slug: 'verl-mental-model',
+    slug: 'llm-rl-systems-overview',
     n: '01',
-    title: 'A mental model of VERL',
+    title: 'How an LLM RL system fits together',
     pubDate: '2026-05-22',
     summary: 'The systems-level overview. Single-controller orchestration, the unifying advantage estimator, multi-turn agent loops, and where the framework strains.',
   },
   {
-    slug: 'verl-algorithm-zoo',
+    slug: 'llm-rl-algorithm-interface',
     n: '02',
     title: "PPO, GRPO, DAPO, and friends: VERL's algorithm zoo",
     pubDate: '2026-05-23',
     summary: 'The algorithm interface. Five RL algorithms expressed as specializations of one advantage-estimator + KL-placement function.',
   },
   {
-    slug: 'verl-reward-functions',
+    slug: 'llm-rl-reward-design',
     n: '03',
-    title: 'Reward functions in VERL: rule, model, composite, and PRM',
+    title: 'Reward design is the hard part of LLM RL',
     pubDate: '2026-05-24',
     summary: 'Where the learning signal comes from. Rule-based scoring, learned RMs, composition, the five reward-hacking patterns, and how to layer a PRM on top.',
   },
   {
-    slug: 'verl-multi-turn-agentloop',
+    slug: 'llm-rl-multi-turn',
     n: '04',
-    title: 'Multi-turn rollouts and AgentLoop in VERL',
+    title: 'Multi-turn agents: interleaving generation, tools, and training',
     pubDate: '2026-05-25',
     summary: 'The coroutine state machine, the response_mask trick, tool integration, multi-turn reward design, and the templating landmines.',
   },
   {
-    slug: 'verl-environments-tools',
+    slug: 'llm-rl-environments',
     n: '05',
-    title: 'Custom environments and tools for VERL agents',
+    title: 'Why LLM RL frameworks don\'t ship an environment class',
     pubDate: '2026-05-26',
     summary: 'Why there\'s no formal Env class. The @function_tool anatomy. Sandboxed code execution. Search, browser, RAG patterns. Failure modes.',
   },
   {
-    slug: 'verl-backends-internals',
+    slug: 'llm-rl-engines',
     n: '06',
-    title: 'The backends behind VERL: vLLM, SGLang, FSDP, Megatron',
+    title: 'Training and inference engines have opposite goals',
     pubDate: '2026-05-27',
     summary: 'Why training and inference engines have opposite design pressures and how the 3D-HybridEngine bridges them. PagedAttention, RadixAttention, FSDP all-gather, Megatron TP×PP×DP.',
   },
   {
-    slug: 'verl-scaling-async',
+    slug: 'llm-rl-scaling',
     n: '07',
-    title: 'Scaling VERL: parameter resharding, async rollout, and what changes at 70B+',
+    title: 'Where LLM RL bottlenecks move as you scale',
     pubDate: '2026-05-28',
     summary: 'Where the bottleneck migrates as you scale. Parameter resharding internals, one-step-off vs fully async, NCCL primitives, memory budgeting, three case studies.',
   },
   {
-    slug: 'verl-debugging-evaluation',
+    slug: 'llm-rl-observability',
     n: '08',
-    title: 'Debugging, evaluating, and observing VERL training runs',
+    title: 'Operating an LLM RL training run',
     pubDate: '2026-05-28',
     summary: 'The operational side. Canonical metrics, healthy-vs-sick fingerprints, the five named failure modes, train-vs-prod drift, a debugging playbook.',
   },
@@ -116,12 +116,12 @@ const fmt = (d: string) =>
   author       = {Ashish Mehta},
   title        = {A systems view of LLM RL},
   year         = {2026},
-  url          = {https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl/},
+  url          = {https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl-systems/},
   note         = {Eight-post technical series}
 }`}</pre>
       <p class="series-cite-alt">
         Plain text: Mehta, A. (2026). <em>A systems view of LLM RL.</em> Retrieved from
-        <code>https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl/</code>.
+        <code>https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl-systems/</code>.
       </p>
     </section>
   </article>

@@ -1,6 +1,6 @@
 ---
-title: "Custom environments and tools for VERL agents"
-description: "How to plug your environment into VERL. Why there's no formal Env class; the @function_tool anatomy; sandboxed code execution; search/browser/RAG tools; tool-level rewards; failure modes."
+title: "Why LLM RL frameworks don't ship an environment class"
+description: "Plugging environments and tools into an LLM RL system — and why the right abstraction is a function, not a Gym-style Env. Sandboxed code execution, search, retrieval, tool-level rewards, with VERL as the worked example."
 pubDate: 2026-05-26
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "tools", "agents", "environments"]
@@ -12,7 +12,7 @@ import SandboxArchitecture from '../../components/blog/verl/SandboxArchitecture.
 import ReActVsFunctionCalling from '../../components/blog/verl/ReActVsFunctionCalling.astro';
 import ToolLatencyVsReward from '../../components/blog/verl/ToolLatencyVsReward.astro';
 
-This post is about plugging things into [VERL](https://github.com/verl-project/verl). Code execution sandboxes, search APIs, browsers, retrieval, anything stateful. Less about the AgentLoop machinery (covered in [the multi-turn post](/ashish-ai-blog/blog/verl-multi-turn-agentloop/)) and more about the practical surface — what an environment looks like, what canonical tools are useful, how to wire them in, and where the sharp edges are.
+Classical RL has a clean environment interface — `reset()`, `step()`, `done` — and a generation of practitioners learned to expect it. LLM RL frameworks mostly *don't* provide one, and that absence is a deliberate design decision worth understanding. This post is about how you actually plug environments and tools into an LLM RL system — code-execution sandboxes, search APIs, browsers, retrieval — and why the right abstraction turns out to be a function, not a Gym-style `Env`. We use [VERL](https://github.com/verl-project/verl) as the worked example (its tool interface is, pointedly, a decorated Python function); the rollout/agent-loop machinery itself is covered in [the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/).
 
 ## §1 — Why VERL has no formal Env class
 
@@ -297,7 +297,7 @@ This works because the framework doesn't pretend to be a general-purpose RL fram
 
 The cost is that there's no shared abstraction for "an environment with reset semantics and well-defined episodes." If you need that, you build it yourself, inside a tool, with per-instance state. The benefit is that the surface area you have to learn is small: one decorator, one base class, four methods.
 
-The [next post in this series](/ashish-ai-blog/blog/verl-backends-internals/) opens the box on the backends — vLLM, SGLang, FSDP, Megatron — that make all of this run efficiently at scale.
+The [next post in this series](/ashish-ai-blog/blog/llm-rl-engines/) opens the box on the backends — vLLM, SGLang, FSDP, Megatron — that make all of this run efficiently at scale.
 
 ## References
 

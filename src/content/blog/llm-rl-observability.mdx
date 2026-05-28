@@ -1,6 +1,6 @@
 ---
-title: "Debugging, evaluating, and observing VERL training runs"
-description: "The operational side of LLM RL. What to log, what healthy training looks like, the five named failure modes with their metric fingerprints, train-vs-prod rollout discrepancies, and a debugging playbook."
+title: "Operating an LLM RL training run"
+description: "The operational side of LLM RL: what to log, what healthy training looks like, the five failure modes and their metric fingerprints, train-vs-prod rollout drift, and a debugging playbook. VERL as the worked example."
 pubDate: 2026-05-28
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "debugging", "observability", "evaluation"]
@@ -70,7 +70,7 @@ Bad runs deviate from this picture in *specific* ways — different deviations i
 
 **Failure 3: Reward hacking.** Training reward climbs sharply; eval reward stagnates or drops. The policy is gaming your reward function rather than solving the task.
 - Root cause: a bug in your reward function (loophole in the verifier, RM exploitation pattern).
-- Fix: see [the rewards post](/ashish-ai-blog/blog/verl-reward-functions/) §6 for the five named hacking patterns and their mitigations. Tighten your verifier first.
+- Fix: see [the rewards post](/ashish-ai-blog/blog/llm-rl-reward-design/) §6 for the five named hacking patterns and their mitigations. Tighten your verifier first.
 
 **Failure 4: Gradient instability.** Gradient norm oscillates between 0 and 100; periodic NaN losses appear in logs.
 - Root cause: numerical instability — bf16 underflow in attention, learning rate too high for the data, very long responses with extreme advantages.
@@ -160,7 +160,7 @@ When training is misbehaving, work through this in order:
 
 1. **Read the rollouts.** Sample 20 responses from the most recent training step. Look at them. Are they coherent? Are they doing the task? This catches 60% of bugs before you look at any metric.
 
-2. **Check the response_mask.** Histogram of response_mask=1 coverage. If many rollouts have very low mask coverage, the AgentLoop is treating tool outputs as policy outputs (or vice versa). See [the multi-turn post](/ashish-ai-blog/blog/verl-multi-turn-agentloop/) §8 for templating landmines.
+2. **Check the response_mask.** Histogram of response_mask=1 coverage. If many rollouts have very low mask coverage, the AgentLoop is treating tool outputs as policy outputs (or vice versa). See [the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/) §8 for templating landmines.
 
 3. **Compare training reward vs eval reward.** If they diverge, you have reward hacking. Investigate the reward function.
 
@@ -170,7 +170,7 @@ When training is misbehaving, work through this in order:
 
 6. **Check gradient norms.** Spikes correlate with bad updates. Add `grad_clip` if not already on.
 
-7. **Profile.** If everything looks reasonable but training is slow, run a profiler. See [the scaling post](/ashish-ai-blog/blog/verl-scaling-async/) §7.
+7. **Profile.** If everything looks reasonable but training is slow, run a profiler. See [the scaling post](/ashish-ai-blog/blog/llm-rl-scaling/) §7.
 
 8. **Diff against a known-good run.** If you have a previous run that worked, diff the configs. The smallest change is often the culprit.
 
@@ -215,13 +215,13 @@ This is the last post in the series. Across eight posts, we've covered the menta
 ## References
 
 - The full series:
-  - [A mental model of VERL](/ashish-ai-blog/blog/verl-mental-model/)
-  - [PPO, GRPO, DAPO, and friends: VERL's algorithm zoo](/ashish-ai-blog/blog/verl-algorithm-zoo/)
-  - [Reward functions in VERL](/ashish-ai-blog/blog/verl-reward-functions/)
-  - [Multi-turn rollouts and AgentLoop in VERL](/ashish-ai-blog/blog/verl-multi-turn-agentloop/)
-  - [Custom environments and tools for VERL agents](/ashish-ai-blog/blog/verl-environments-tools/)
-  - [The backends behind VERL](/ashish-ai-blog/blog/verl-backends-internals/)
-  - [Scaling VERL](/ashish-ai-blog/blog/verl-scaling-async/)
+  - [How an LLM RL system fits together](/ashish-ai-blog/blog/llm-rl-systems-overview/)
+  - [The algorithm interface: PPO, GRPO, and DAPO as one function](/ashish-ai-blog/blog/llm-rl-algorithm-interface/)
+  - [Reward design is the hard part of LLM RL](/ashish-ai-blog/blog/llm-rl-reward-design/)
+  - [Multi-turn agents: interleaving generation, tools, and training](/ashish-ai-blog/blog/llm-rl-multi-turn/)
+  - [Why LLM RL frameworks don't ship an environment class](/ashish-ai-blog/blog/llm-rl-environments/)
+  - [Training and inference engines have opposite goals](/ashish-ai-blog/blog/llm-rl-engines/)
+  - [Where LLM RL bottlenecks move as you scale](/ashish-ai-blog/blog/llm-rl-scaling/)
   - This post.
 - [W&B's RL guide](https://wandb.ai/).
 - [VERL logging configuration](https://verl.readthedocs.io/en/latest/).

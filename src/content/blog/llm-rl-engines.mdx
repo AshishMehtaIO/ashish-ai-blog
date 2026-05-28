@@ -1,6 +1,6 @@
 ---
-title: "The backends behind VERL: vLLM, SGLang, FSDP, Megatron"
-description: "Opening the box on VERL's pluggable engines. Why training and inference engines have opposite design pressures, how vLLM's PagedAttention and SGLang's RadixAttention work, how FSDP and Megatron-LM shard parameters, and how the 3D-HybridEngine bridges them."
+title: "Training and inference engines have opposite goals — how RL frameworks bridge them"
+description: "An LLM RL system runs two engines with opposite design pressures. Why they're separate codebases, how each works internally (PagedAttention, RadixAttention, FSDP, Megatron), and the adapter that moves weights between them — with VERL as the worked example."
 pubDate: 2026-05-27
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "vllm", "sglang", "fsdp", "megatron"]
@@ -13,7 +13,7 @@ import FSDPAllGather from '../../components/blog/verl/FSDPAllGather.astro';
 import MegatronTP from '../../components/blog/verl/MegatronTP.astro';
 import BackendChoiceFlow from '../../components/blog/verl/BackendChoiceFlow.astro';
 
-The intro post in this series treated [VERL](https://github.com/verl-project/verl)'s backends as pluggable boxes: pick a rollout engine, pick a training engine, run. This post opens the boxes. We cover the four backends in production use — vLLM, SGLang for rollout; FSDP, Megatron-LM for training — what each one does internally, *why* each design exists, and how VERL's 3D-HybridEngine adapter shuttles weights between them.
+An LLM RL system has to run two fundamentally different engines: one optimized for *training* (sharded parameters, gradients, throughput) and one optimized for *inference* (paged KV cache, low-latency autoregressive decode). These pull in opposite directions — which is why, in every serious framework, they are separate codebases glued together by an adapter. This post opens both boxes: vLLM and SGLang for rollout, FSDP and Megatron-LM for training — what each does internally and *why* the design exists. We use [VERL](https://github.com/verl-project/verl) as the worked example, and its 3D-HybridEngine as the worked example of the bridge between the two.
 
 The central observation: **training and inference engines have opposite design pressures.** Training wants high throughput on large batches with sharded parameters and gradient computation. Inference wants low-latency per-token generation, paged KV caches, and full parameters resident on each GPU. You cannot have both. Hence two codebases, and an adapter.<Sidenote id="sn-prereqs">Assumes you've seen what FSDP and vLLM are at the surface. The internals matter when you're choosing a stack or debugging a performance regression. No expectation of having read other posts in this series.</Sidenote>
 
@@ -138,7 +138,7 @@ The adapter's job is non-trivial because the sharding patterns are different:
 
 The adapter handles the resharding *in flight* via NCCL/HCCL collectives — no disk checkpoint roundtrip. Bandwidth is the bottleneck (8 GB/s on H100+InfiniBand per the HybridFlow paper). For a 70B model in BF16 (~140GB), that's ~17 seconds of transfer time per iteration's parameter update — small relative to a multi-minute training step.
 
-We covered the resharding workflow visually in [the intro post](/ashish-ai-blog/blog/verl-mental-model/#resharding); the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/) goes deeper into the message ordering and bandwidth optimization.
+We covered the resharding workflow visually in [the intro post](/ashish-ai-blog/blog/llm-rl-systems-overview/#resharding); the [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/) goes deeper into the message ordering and bandwidth optimization.
 
 ## §7 — Quantization in RL
 
@@ -208,7 +208,7 @@ VERL's backend story is: **train with the engine optimized for training; rollout
 
 The adapter is the unsung hero. Most of the engineering complexity in VERL is in the resharding logic — not because the rollout or training engines are simple individually, but because they're separately maintained external projects, and gluing them efficiently is hard. When you read VERL's `workers/sharding_manager/`, you're reading the code that makes the rest of the system work.
 
-The [next post in this series](/ashish-ai-blog/blog/verl-scaling-async/) takes the backends as given and asks: at what scale does what bottleneck dominate, and what's the engineering response.
+The [next post in this series](/ashish-ai-blog/blog/llm-rl-scaling/) takes the backends as given and asks: at what scale does what bottleneck dominate, and what's the engineering response.
 
 ## References
 

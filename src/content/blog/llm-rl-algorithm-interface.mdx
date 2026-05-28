@@ -1,6 +1,6 @@
 ---
-title: "PPO, GRPO, DAPO, and friends: VERL's algorithm zoo"
-description: "A working tour of the five RL algorithms VERL implements — how each one computes the policy gradient signal, when it dominates, and what its knobs do."
+title: "The algorithm interface: PPO, GRPO, and DAPO as one function"
+description: "Five RL algorithms — PPO, GRPO, RLOO, REINFORCE++, DAPO — are specializations of a single interface: the advantage estimator. How the design space collapses to one function, shown through VERL."
 pubDate: 2026-05-23
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf", "ppo", "grpo", "dapo"]
@@ -15,9 +15,9 @@ import ISRatioExplorer from '../../components/blog/verl/ISRatioExplorer.astro';
 import AlgorithmDecisionTree from '../../components/blog/verl/AlgorithmDecisionTree.astro';
 import AlgorithmMatrix from '../../components/blog/verl/AlgorithmMatrix.astro';
 
-[VERL](https://github.com/verl-project/verl) supports five RL algorithms for fine-tuning language models — PPO, GRPO, RLOO, REINFORCE++, and DAPO — selected by a single config key. This post is the working tour. We walk each algorithm, name what it adds and what it drops, render the math in its useful final form, and end with a decision tree for picking one.
+An LLM RL framework has to support a zoo of algorithms — PPO, GRPO, RLOO, REINFORCE++, DAPO — without forking the trainer for each one. There is a clean systems answer: the algorithms differ in *one place*, the advantage estimator, and share everything else. This post earns that claim with the math, walking each algorithm, naming what it adds and drops, and ending with a decision tree. We use [VERL](https://github.com/verl-project/verl) as the worked example — there, the algorithm is a single config key that selects one function.
 
-A claim the intro post in this series made: **the algorithms differ in *one place*, and the rest of VERL's machinery is unchanged.** That is the design's most elegant property and the reason adding a new algorithm — DAPO is the canonical example — is mostly a config recipe rather than a fork.<Sidenote id="sn-intro-recap">If you read the [intro post](/ashish-ai-blog/blog/verl-mental-model/), this is the §5 expansion. If you didn't, you don't need to — this post is self-contained. It assumes you know classical RL at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) level and have seen PPO at least once.</Sidenote>
+A claim the intro post in this series made: **the algorithms differ in *one place*, and the rest of VERL's machinery is unchanged.** That is the design's most elegant property and the reason adding a new algorithm — DAPO is the canonical example — is mostly a config recipe rather than a fork.<Sidenote id="sn-intro-recap">If you read the [intro post](/ashish-ai-blog/blog/llm-rl-systems-overview/), this is the §5 expansion. If you didn't, you don't need to — this post is self-contained. It assumes you know classical RL at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) level and have seen PPO at least once.</Sidenote>
 
 We will earn that claim with the math. By the end you should be able to: read VERL's [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) without surprises; choose an algorithm for a given workload; and reason about which hyperparameters to touch when training misbehaves.
 
@@ -367,7 +367,7 @@ Three case-study sketches:
 
 - **Math RLVR (GSM8K, MATH).** GRPO is the standard; DAPO is the upgrade. Both use rule-based verifier rewards. Group size 8–16 is typical.
 - **Code generation with test-suite rewards.** GRPO or DAPO. Asymmetric clip helps preserve exploration when most generations fail tests.
-- **Helpfulness fine-tuning with a learned RM.** PPO with GAE is the historical baseline. GRPO works when the RM is well-calibrated. Be especially careful about reward hacking — see [the next post in this series](/ashish-ai-blog/blog/verl-reward-functions/) (forthcoming).
+- **Helpfulness fine-tuning with a learned RM.** PPO with GAE is the historical baseline. GRPO works when the RM is well-calibrated. Be especially careful about reward hacking — see [the next post in this series](/ashish-ai-blog/blog/llm-rl-reward-design/) (forthcoming).
 
 ## §10 — Hyperparameter intuitions
 
@@ -393,9 +393,9 @@ Things these algorithms cannot do.
 
 **Offline preference learning.** PPO/GRPO/etc. all require *online generation* — sampling from the current policy. If you only have a static preference dataset (e.g., human ratings on responses produced by a different model), look at [DPO](https://arxiv.org/abs/2305.18290), [SimPO](https://arxiv.org/abs/2405.14734), [KTO](https://arxiv.org/abs/2402.01306), or [IPO](https://arxiv.org/abs/2310.12036). These do not appear in VERL's main `adv_estimator` list because they aren't fit for that interface — they bypass advantage entirely.
 
-**Per-step process supervision.** All five algorithms in this post assume a *terminal* reward (or terminal-broadcast). If you have step-level annotations — "step 3 is wrong" — you need a process reward model (PRM) and a way to plumb token-level rewards through. VERL's `token_level_scores` tensor *can* carry these, but no native PRM pipeline ships with the framework today. See the [reward functions post](/ashish-ai-blog/blog/verl-reward-functions/) (forthcoming) for how to build this yourself.
+**Per-step process supervision.** All five algorithms in this post assume a *terminal* reward (or terminal-broadcast). If you have step-level annotations — "step 3 is wrong" — you need a process reward model (PRM) and a way to plumb token-level rewards through. VERL's `token_level_scores` tensor *can* carry these, but no native PRM pipeline ships with the framework today. See the [reward functions post](/ashish-ai-blog/blog/llm-rl-reward-design/) (forthcoming) for how to build this yourself.
 
-**Off-policy correction beyond one or two steps of staleness.** PPO's clip handles a small amount of staleness. Fully async training (the rollout pool is generating ahead of the trainer) needs more care than the clip provides — generally a [V-trace](https://arxiv.org/abs/1802.01561)-style correction. VERL's async work is moving in this direction; see the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/) (forthcoming).
+**Off-policy correction beyond one or two steps of staleness.** PPO's clip handles a small amount of staleness. Fully async training (the rollout pool is generating ahead of the trainer) needs more care than the clip provides — generally a [V-trace](https://arxiv.org/abs/1802.01561)-style correction. VERL's async work is moving in this direction; see the [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/) (forthcoming).
 
 **Multi-agent / self-play.** These exist in RL but are not in scope for VERL's current algorithm set. Plug-and-play self-play would require a parallel-policy rollout abstraction that doesn't exist yet.
 

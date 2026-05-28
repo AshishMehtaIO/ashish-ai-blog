@@ -1,6 +1,6 @@
 ---
-title: "Multi-turn rollouts and AgentLoop in VERL"
-description: "How VERL's multi-turn machinery works — the AgentLoop coroutine state machine, the response_mask trick, tool integration via @function_tool, multi-turn reward design, async rollouts across turns, and the templating landmines."
+title: "Multi-turn agents: interleaving generation, tools, and training"
+description: "How an LLM RL system handles multi-turn agent rollouts — the coroutine state machine, the response_mask trick, tool integration, multi-turn reward design, async across turns, and the templating landmines. VERL's AgentLoop as the worked example."
 pubDate: 2026-05-25
 author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf", "agents", "multi-turn"]
@@ -12,7 +12,7 @@ import ResponseMaskDeep from '../../components/blog/verl/ResponseMaskDeep.astro'
 import ToolLifecycle from '../../components/blog/verl/ToolLifecycle.astro';
 import ConversationTree from '../../components/blog/verl/ConversationTree.astro';
 
-Single-turn LLM RL is conceptually simple: prompt in, response out, reward, update. Multi-turn — where the agent generates, observes a tool or environment response, generates again, observes again, finally answers — introduces machinery the single-turn case does not need. [VERL](https://github.com/verl-project/verl) packages that machinery into one abstraction: the `AgentLoop`. This post is the working reference.
+Single-turn LLM RL is conceptually simple: prompt in, response out, reward, update. Multi-turn — where the agent generates, observes a tool or environment response, generates again, observes again, finally answers — introduces machinery the single-turn case does not need, and an LLM RL system has to provide it without breaking the loss math. This post is about that machinery: the coroutine state machine, the per-token mask that keeps everything downstream single-turn-shaped, tool integration, and the multi-turn reward and templating problems. We use [VERL](https://github.com/verl-project/verl)'s `AgentLoop` as the worked example.
 
 We cover the AgentLoop's coroutine state machine, the AgentData object that travels across turns, the `response_mask` trick that keeps multi-turn losses sane, tool integration via the `@function_tool` decorator and `BaseTool` lifecycle, multi-turn reward design, how async rollouts behave across turns, and the templating landmines VERL's docs explicitly warn about.<Sidenote id="sn-prereqs">Assumes you've seen single-turn RLHF/PPO before but not necessarily VERL specifically. The AgentLoop machinery lives in <code>verl/experimental/agent_loop/</code>; the "experimental" path is a stability hint we come back to in the limits section.</Sidenote>
 
@@ -191,7 +191,7 @@ What multi-turn adds: rollouts have *variable length*. A simple math problem mig
 - **Dynamic batching at the rollout level**: as agent loops finish, they're removed from the active set and new ones are added. The rollout engine doesn't wait for the slowest loop in a batch.
 - **Turn limits**: a hard maximum on turns prevents pathological loops from blocking training indefinitely.
 
-Async multi-turn is where the "one-step-off async" abstraction starts to get strained — staleness now depends on how long a rollout takes, not just on how recently weights were synced. The fully-async mode handles this more gracefully but at the cost of more variable staleness. We cover the details in [the scaling post](/ashish-ai-blog/blog/verl-scaling-async/).
+Async multi-turn is where the "one-step-off async" abstraction starts to get strained — staleness now depends on how long a rollout takes, not just on how recently weights were synced. The fully-async mode handles this more gracefully but at the cost of more variable staleness. We cover the details in [the scaling post](/ashish-ai-blog/blog/llm-rl-scaling/).
 
 ## §8 — Templating landmines
 
@@ -248,7 +248,7 @@ The AgentLoop is the right abstraction. Tools-as-functions is the right interfac
 
 If you're building a multi-turn agent on VERL, the practical advice is: start with `ToolAgentLoop` and the function-tool decorator; use the GSM8K calculator example as your reference; train with GRPO and a small terminal reward plus tool-level rewards; watch the response_mask coverage in your logs; pin your chat template; and assume you'll discover one templating bug per week for the first month.
 
-The [next post in this series](/ashish-ai-blog/blog/verl-environments-tools/) goes deep on the tools themselves — sandboxed code execution, browser tools, retrieval, the practical patterns for building production tool agents on top of this machinery.
+The [next post in this series](/ashish-ai-blog/blog/llm-rl-environments/) goes deep on the tools themselves — sandboxed code execution, browser tools, retrieval, the practical patterns for building production tool agents on top of this machinery.
 
 ## References
 
