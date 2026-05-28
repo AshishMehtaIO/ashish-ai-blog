@@ -1,0 +1,139 @@
+---
+// Viz — Bottleneck migration. 4 model scales, stacked bars showing which
+// phase dominates at each.
+---
+
+<figure class="bm-figure" aria-label="Bottleneck migration across scales">
+  <svg viewBox="0 0 720 280" class="bm-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="bars"></g>
+    <g data-region="labels"></g>
+  </svg>
+
+  <div class="bm-legend">
+    <span class="bm-leg"><span class="bm-dot bm-c-train"></span>training</span>
+    <span class="bm-leg"><span class="bm-dot bm-c-rollout"></span>rollout</span>
+    <span class="bm-leg"><span class="bm-dot bm-c-reshard"></span>resharding</span>
+    <span class="bm-leg"><span class="bm-dot bm-c-comm"></span>communication</span>
+    <span class="bm-leg"><span class="bm-dot bm-c-other"></span>other</span>
+  </div>
+
+  <figcaption>
+    The bottleneck migrates with scale. At 7B, training-side compute dominates. At 70B,
+    parameter resharding becomes significant. At 405B+, inter-rank communication is
+    everywhere. The optimization that helps the most depends on which segment is currently
+    longest.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // 4 tiers: [name, train, rollout, reshard, comm, other] — percentages
+    const TIERS = [
+      { name: '7B · 8 GPUs',     bars: { train: 55, rollout: 30, reshard: 3,  comm: 5,  other: 7 } },
+      { name: '13B · 8 GPUs',    bars: { train: 42, rollout: 35, reshard: 8,  comm: 8,  other: 7 } },
+      { name: '70B · 32 GPUs',   bars: { train: 30, rollout: 25, reshard: 30, comm: 10, other: 5 } },
+      { name: '405B · 256 GPUs', bars: { train: 22, rollout: 18, reshard: 25, comm: 30, other: 5 } },
+    ];
+
+    const COLORS: Record<string, string> = {
+      train:   '#6b4ab8',
+      rollout: '#d08a3e',
+      reshard: '#4a78c2',
+      comm:    '#b85c5c',
+      other:   '#8a8a8a',
+    };
+
+    document.querySelectorAll<HTMLElement>('.bm-figure').forEach((fig) => {
+      const barsG = fig.querySelector<SVGGElement>('[data-region="bars"]')!;
+      const labelsG = fig.querySelector<SVGGElement>('[data-region="labels"]')!;
+
+      const X_START = 30;
+      const X_END = 700;
+      const Y_BASE = 230;
+      const BAR_W = 100;
+      const BAR_GAP = (X_END - X_START - 4 * BAR_W) / 5;
+      const SCALE = 200 / 100;
+
+      TIERS.forEach((tier, i) => {
+        const x = X_START + (i + 1) * BAR_GAP + i * BAR_W;
+        let yCursor = Y_BASE;
+        ['train', 'rollout', 'reshard', 'comm', 'other'].forEach((seg) => {
+          const pct = tier.bars[seg as keyof typeof tier.bars];
+          const h = pct * SCALE;
+          yCursor -= h;
+          el('rect', { x, y: yCursor, width: BAR_W, height: h, fill: COLORS[seg], opacity: 0.85 }, barsG);
+          if (h > 14) {
+            el('text', {
+              x: x + BAR_W / 2, y: yCursor + h / 2 + 4,
+              class: 'bm-seg-label', 'text-anchor': 'middle', fill: 'white',
+            }, barsG).textContent = `${pct}%`;
+          }
+        });
+        // Tier label
+        el('text', { x: x + BAR_W / 2, y: Y_BASE + 22, class: 'bm-tier-label', 'text-anchor': 'middle' }, labelsG).textContent = tier.name;
+      });
+
+      // Title
+      el('text', { x: 360, y: 22, class: 'bm-title', 'text-anchor': 'middle' }, labelsG).textContent = 'iteration time breakdown';
+      el('text', { x: 22, y: 130, class: 'bm-axis', 'text-anchor': 'middle', transform: 'rotate(-90 22 130)' }, labelsG).textContent = '% of iteration time';
+    });
+  })();
+</script>
+
+<style>
+  .bm-figure { margin: 2.5rem 0; max-width: 880px; }
+  .bm-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .bm-figure :global(.bm-seg-label) {
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .bm-figure :global(.bm-tier-label) {
+    fill: var(--text);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .bm-figure :global(.bm-title) {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-sans);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .bm-figure :global(.bm-axis) {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-sans);
+  }
+  .bm-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-top: 0.6rem;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+  .bm-leg { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .bm-dot { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
+  .bm-c-train   { background: #6b4ab8; }
+  .bm-c-rollout { background: #d08a3e; }
+  .bm-c-reshard { background: #4a78c2; }
+  .bm-c-comm    { background: #b85c5c; }
+  .bm-c-other   { background: #8a8a8a; }
+</style>

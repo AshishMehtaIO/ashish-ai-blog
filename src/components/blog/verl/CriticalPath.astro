@@ -1,0 +1,179 @@
+---
+// Viz — Critical path. Slider for "async overlap"; show segments shrinking
+// as overlap increases.
+---
+
+<figure class="cp-figure" aria-label="Critical path optimization">
+  <div class="cp-controls">
+    <label class="cp-slider">
+      <span class="cp-label">async overlap (0 = sync, 1 = full)</span>
+      <input type="range" min="0" max="100" step="5" value="0" data-control="overlap" />
+      <output data-readout="overlap">0%</output>
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 260" class="cp-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <text x="20" y="30" class="cp-row-label">sync</text>
+    <text x="20" y="110" class="cp-row-label">interactive</text>
+
+    <g data-region="sync-bars"></g>
+    <g data-region="async-bars"></g>
+
+    <line x1="60" y1="200" x2="700" y2="200" class="cp-axis" />
+    <text x="380" y="240" class="cp-axis-label" text-anchor="middle">wall time →</text>
+  </svg>
+
+  <div class="cp-readouts">
+    <div class="cp-stat"><span class="cp-label">sync iteration time</span><strong data-readout="sync-time">—</strong></div>
+    <div class="cp-stat"><span class="cp-label">current iteration time</span><strong data-readout="cur-time">—</strong></div>
+    <div class="cp-stat"><span class="cp-label">speedup</span><strong data-readout="speedup">—</strong></div>
+  </div>
+
+  <figcaption>
+    Top row is the synchronous baseline: training, rollout, resharding run sequentially.
+    Bottom row is what you can achieve by overlapping rollout with training (async). At 100%
+    overlap, the rollout phase is entirely hidden by the training phase. The critical path
+    shortens to <code>max(training, rollout) + reshard</code> instead of their sum.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // For the 70B case
+    const TRAIN_S = 20;
+    const ROLLOUT_S = 15;
+    const RESHARD_S = 25;
+
+    document.querySelectorAll<HTMLElement>('.cp-figure').forEach((fig) => {
+      const syncG = fig.querySelector<SVGGElement>('[data-region="sync-bars"]')!;
+      const asyncG = fig.querySelector<SVGGElement>('[data-region="async-bars"]')!;
+      const overlapInput = fig.querySelector<HTMLInputElement>('[data-control="overlap"]')!;
+      const overlapReadout = fig.querySelector<HTMLOutputElement>('[data-readout="overlap"]')!;
+      const syncTimeEl = fig.querySelector<HTMLElement>('[data-readout="sync-time"]')!;
+      const curTimeEl = fig.querySelector<HTMLElement>('[data-readout="cur-time"]')!;
+      const speedupEl = fig.querySelector<HTMLElement>('[data-readout="speedup"]')!;
+
+      const X_START = 60;
+      const TIME_SCALE = 8;  // pixels per second
+
+      function bar(parent: SVGGElement, x: number, y: number, duration: number, label: string, color: string) {
+        const w = duration * TIME_SCALE;
+        el('rect', { x, y, width: w, height: 35, rx: 3, fill: color, opacity: 0.85 }, parent);
+        if (w > 50) {
+          el('text', { x: x + w/2, y: y + 22, class: 'cp-bar-label', 'text-anchor': 'middle' }, parent).textContent = label;
+        }
+        return x + w;
+      }
+
+      function render() {
+        const overlap = parseInt(overlapInput.value, 10) / 100;
+        overlapReadout.value = `${(overlap * 100).toFixed(0)}%`;
+
+        // Sync version: train → rollout → reshard, sequential
+        syncG.replaceChildren();
+        let x = X_START;
+        x = bar(syncG, x, 15, TRAIN_S, `train ${TRAIN_S}s`, '#6b4ab8');
+        x = bar(syncG, x, 15, ROLLOUT_S, `rollout ${ROLLOUT_S}s`, '#d08a3e');
+        x = bar(syncG, x, 15, RESHARD_S, `reshard ${RESHARD_S}s`, '#4a78c2');
+        const syncTotal = TRAIN_S + ROLLOUT_S + RESHARD_S;
+
+        // Async version: training overlaps with rollout
+        asyncG.replaceChildren();
+        // Effective rollout that runs in parallel
+        const overlappedRollout = Math.min(ROLLOUT_S, TRAIN_S) * overlap;
+        const exposedRollout = ROLLOUT_S - overlappedRollout;
+        x = X_START;
+        bar(asyncG, x, 95, TRAIN_S, `train ${TRAIN_S}s`, '#6b4ab8');
+        // Rollout in parallel (above)
+        if (overlap > 0) {
+          el('rect', { x: X_START, y: 78, width: overlappedRollout * TIME_SCALE, height: 12, rx: 2, fill: '#d08a3e', opacity: 0.5 }, asyncG);
+        }
+        x = X_START + TRAIN_S * TIME_SCALE;
+        if (exposedRollout > 0.01) {
+          x = bar(asyncG, x, 95, exposedRollout, `tail ${exposedRollout.toFixed(0)}s`, '#d08a3e');
+        }
+        x = bar(asyncG, x, 95, RESHARD_S, `reshard ${RESHARD_S}s`, '#4a78c2');
+        const asyncTotal = TRAIN_S + exposedRollout + RESHARD_S;
+
+        syncTimeEl.textContent = `${syncTotal}s`;
+        curTimeEl.textContent = `${asyncTotal.toFixed(0)}s`;
+        speedupEl.textContent = `${(syncTotal / asyncTotal).toFixed(2)}×`;
+      }
+
+      overlapInput.addEventListener('input', render);
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .cp-figure { margin: 2.5rem 0; max-width: 880px; }
+  .cp-controls { margin-bottom: 0.6rem; }
+  .cp-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.6rem;
+    align-items: center;
+  }
+  .cp-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .cp-slider input[type="range"] { accent-color: var(--accent); }
+  .cp-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 3rem;
+    text-align: right;
+  }
+  .cp-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .cp-row-label {
+    fill: var(--text);
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .cp-axis { stroke: var(--border-strong); stroke-width: 1; }
+  .cp-axis-label { fill: var(--text-faint); font-size: 11px; font-family: var(--font-sans); }
+  .cp-figure :global(.cp-bar-label) {
+    fill: white;
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .cp-readouts {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .cp-readouts { grid-template-columns: 1fr; } }
+  .cp-stat {
+    padding: 0.55rem 0.8rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  .cp-stat .cp-label {
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .cp-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    color: var(--text);
+  }
+</style>

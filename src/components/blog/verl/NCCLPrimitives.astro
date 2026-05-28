@@ -1,0 +1,191 @@
+---
+// Viz — NCCL primitives. Pick a primitive; see the data flow pattern across 4 GPUs.
+---
+
+<figure class="nccl-figure" aria-label="NCCL collective primitives">
+  <div class="nccl-tabs" role="tablist">
+    <button type="button" role="tab" class="nccl-tab active" data-prim="broadcast"      aria-selected="true">broadcast</button>
+    <button type="button" role="tab" class="nccl-tab"        data-prim="all-reduce"     aria-selected="false">all-reduce</button>
+    <button type="button" role="tab" class="nccl-tab"        data-prim="all-gather"     aria-selected="false">all-gather</button>
+    <button type="button" role="tab" class="nccl-tab"        data-prim="reduce-scatter" aria-selected="false">reduce-scatter</button>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="nccl-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <marker id="nccl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
+      </marker>
+    </defs>
+    <g data-region="diagram"></g>
+  </svg>
+
+  <div class="nccl-cost">
+    <span class="nccl-label">cost (ring algorithm):</span>
+    <code data-readout="cost">—</code>
+  </div>
+
+  <div class="nccl-callout"><p data-region="callout"></p></div>
+
+  <figcaption>
+    Four core NCCL collectives. Each one has a different data-flow pattern across the four
+    GPUs. The "cost" is the bytes-per-rank that must be transferred (the ring algorithm
+    asymptotic, where N is the number of ranks and D is the total data size).
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    const SPECS = {
+      broadcast: {
+        cost: 'O(D)',
+        callout: 'One rank (the root, GPU 0) sends its data to all other ranks. After: all 4 GPUs have the same data. Use cases: distributing initial model weights, sending small messages from rank 0.',
+        connections: [[0, 1], [0, 2], [0, 3]],
+        labels: ['has D', 'gets D', 'gets D', 'gets D'],
+      },
+      'all-reduce': {
+        cost: 'O(2(N−1)/N · D)',
+        callout: 'Every rank contributes; every rank gets the element-wise sum. Use cases: gradient averaging in DDP/FSDP, KL coefficient sync across ranks. Most-used primitive in distributed training.',
+        connections: [[0,1],[1,2],[2,3],[3,0]],
+        labels: ['contributes; sum', 'contributes; sum', 'contributes; sum', 'contributes; sum'],
+      },
+      'all-gather': {
+        cost: 'O((N−1)/N · D)',
+        callout: 'Each rank starts with a shard (1/N of total); every rank ends with the full concatenation. Use cases: FSDP\'s per-layer parameter materialization. Symmetric pattern.',
+        connections: [[0,1],[1,2],[2,3],[3,0]],
+        labels: ['shard 0', 'shard 1', 'shard 2', 'shard 3'],
+      },
+      'reduce-scatter': {
+        cost: 'O((N−1)/N · D)',
+        callout: 'Inverse of all-gather. Each rank contributes the full data; each rank ends with only its own shard of the element-wise sum. Use cases: FSDP\'s gradient sharding after backward. Symmetric to all-gather in cost.',
+        connections: [[0,1],[1,2],[2,3],[3,0]],
+        labels: ['contributes D, keeps shard 0', 'contributes D, keeps shard 1', 'contributes D, keeps shard 2', 'contributes D, keeps shard 3'],
+      },
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.nccl-figure').forEach((fig) => {
+      const diagramG = fig.querySelector<SVGGElement>('[data-region="diagram"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.nccl-tab'));
+      const costEl = fig.querySelector<HTMLElement>('[data-readout="cost"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      function render(prim: keyof typeof SPECS) {
+        const s = SPECS[prim];
+        diagramG.replaceChildren();
+        // Arrange 4 GPUs in a square
+        const positions = [
+          { x: 160, y: 80 },   // GPU 0 (top-left)
+          { x: 560, y: 80 },   // GPU 1 (top-right)
+          { x: 560, y: 200 },  // GPU 2 (bot-right)
+          { x: 160, y: 200 },  // GPU 3 (bot-left)
+        ];
+
+        // Draw connection arrows
+        s.connections.forEach((c) => {
+          const [from, to] = c;
+          const p1 = positions[from], p2 = positions[to];
+          el('path', {
+            d: `M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`,
+            class: 'nccl-edge',
+            fill: 'none',
+            'marker-end': 'url(#nccl-arr)',
+          }, diagramG);
+        });
+
+        // Draw GPUs
+        positions.forEach((p, i) => {
+          el('rect', { x: p.x - 70, y: p.y - 30, width: 140, height: 60, rx: 6, class: 'nccl-gpu' }, diagramG);
+          el('text', { x: p.x, y: p.y - 8, class: 'nccl-gpu-num', 'text-anchor': 'middle' }, diagramG).textContent = `GPU ${i}`;
+          el('text', { x: p.x, y: p.y + 10, class: 'nccl-gpu-state', 'text-anchor': 'middle' }, diagramG).textContent = s.labels[i];
+        });
+
+        costEl.textContent = s.cost;
+        calloutEl.textContent = s.callout;
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          render(t.getAttribute('data-prim') as keyof typeof SPECS);
+        });
+      });
+      render('broadcast');
+    });
+  })();
+</script>
+
+<style>
+  .nccl-figure { margin: 2.5rem 0; max-width: 880px; }
+  .nccl-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .nccl-tab {
+    font-family: var(--font-sans); font-size: 0.82rem; padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated); color: var(--text-muted);
+    border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer;
+    font-family: var(--font-mono);
+  }
+  .nccl-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .nccl-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .nccl-figure :global(.nccl-gpu) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+  }
+  .nccl-figure :global(.nccl-gpu-num) {
+    fill: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .nccl-figure :global(.nccl-gpu-state) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .nccl-figure :global(.nccl-edge) {
+    stroke: var(--accent);
+    stroke-width: 1.6;
+    opacity: 0.7;
+  }
+  .nccl-cost {
+    margin-top: 0.6rem;
+    padding: 0.5rem 0.85rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .nccl-cost code {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .nccl-label { font-weight: 600; }
+  .nccl-callout {
+    margin-top: 0.6rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .nccl-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

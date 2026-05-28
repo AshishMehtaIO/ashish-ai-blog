@@ -1,0 +1,218 @@
+---
+title: "Scaling VERL: parameter resharding, async rollout, and what changes at 70B+"
+description: "The scaling story for LLM RL. Where the bottleneck migrates as model size grows, the parameter resharding internals, one-step-off vs fully async, communication patterns, memory budgeting, and three concrete case studies."
+pubDate: 2026-07-03
+author: "Ashish"
+tags: ["verl", "rl", "llm", "scaling", "async", "performance"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import BottleneckMigration from '../../components/blog/verl/BottleneckMigration.astro';
+import AsyncStaleness from '../../components/blog/verl/AsyncStaleness.astro';
+import NCCLPrimitives from '../../components/blog/verl/NCCLPrimitives.astro';
+import MemoryBudget from '../../components/blog/verl/MemoryBudget.astro';
+import CriticalPath from '../../components/blog/verl/CriticalPath.astro';
+
+The [HybridFlow paper](https://arxiv.org/abs/2409.19256) reports 1.53× to 20.57× throughput improvements over comparable systems. That's a 13× range. This post is about *why* the range is so wide — what changes between the workload that gets 1.5× and the one that gets 20×. Spoiler: it's about which phase dominates, how often weights have to move, and whether you can hide compute behind I/O.
+
+We walk the scaling story for [VERL](https://github.com/verl-project/verl): the bottleneck migration from 7B to 405B, the parameter resharding internals, the staleness mathematics of async rollout, NCCL communication patterns, memory budgeting at scale, profiling tooling, and three concrete case studies.<Sidenote id="sn-prereqs">Assumes you've seen FSDP/Megatron and vLLM/SGLang at a surface level — [the backends post](/ashish-ai-blog/blog/verl-backends-internals/) is the reference if you haven't. Otherwise self-contained.</Sidenote>
+
+## §1 — The bottleneck migrates with scale
+
+There is no single "scaling problem" in LLM RL. The bottleneck at 7B is different from the bottleneck at 70B is different from the bottleneck at 405B.
+
+<BottleneckMigration />
+
+At each tier, a different phase dominates the iteration time. The engineering response — what you actually optimize — depends on which phase. Optimizing the wrong thing wastes effort.
+
+**~7B on a single 8-GPU node.** Training takes ~50% of iteration time; rollout ~30%; everything else ~20%. The bottleneck is training-side compute. The lever is *anything that increases training-step throughput* — batch size, mixed precision, faster optimizer, fused kernels.
+
+**~13–34B on a single 8-GPU node.** Training and rollout become more balanced. Generation length matters more (longer responses = more rollout time). The lever is *async rollout*: overlap generation and training so neither pool sits idle.
+
+**~70B on 32 GPUs (multi-node).** Parameter resharding starts to bite. Moving 70B in BF16 between training and rollout layouts is ~140GB; even at 8GB/s inter-node bandwidth, that's 17 seconds per iteration. The lever is *async rollout* (now critical, not nice-to-have) and *minimizing the number of reshards per iteration*.
+
+**~405B+ on 256+ GPUs.** Communication everywhere. NCCL collectives across nodes for FSDP. Pipeline-parallel inter-stage activations for Megatron. Inter-pool transfers for resharding. The lever is *topology* — matching parallelism dimensions to network bandwidth.
+
+The pattern: as you scale, the bottleneck moves from compute to memory to communication. Each transition forces a different engineering response.
+
+## §2 — Parameter resharding internals
+
+Resharding moves the policy's weights from the training-side sharded layout (FSDP or Megatron) to the rollout-side layout (vLLM/SGLang's TP-only sharding) via NCCL/HCCL collectives. No disk roundtrip.
+
+The mechanics, per layer, simplified:
+
+1. **Gather phase**: the training-side workers gather the full parameter (all-gather across DP for FSDP; concatenate TP slices for Megatron).
+2. **Broadcast phase**: send the full parameter to the rollout-side workers' ranks.
+3. **Reshard phase**: the rollout side re-slices the parameter into its expected TP layout.
+4. **Free**: the gathered parameter on the training side is released.
+
+The bandwidth bottleneck is step 2. For a 70B model in BF16 (~140GB), even at 8GB/s effective bandwidth that's ~17 seconds. Strategies to mitigate:
+
+- **Overlap with compute**: while the trainer is still doing its optimizer step on layer N, start sending layer N-K's weights to rollout. The 3D-HybridEngine does this when sharding patterns allow.
+- **Reduce the layer-by-layer count**: bundle layers into bigger transfers; fewer NCCL initialization costs.
+- **Dtype conversion in flight**: BF16 → FP8 during transfer halves bandwidth. Supported by SGLang ≥ 0.5.5.
+
+The paper reports 55% average reduction in transfer time after the in-flight reshard optimizations. The remaining cost is the irreducible bandwidth × bytes-to-move.
+
+## §3 — One-step-off async: the staleness math
+
+One-step-off async overlaps rollout for batch $t+1$ with training on batch $t$. After both complete, the new weights transfer and the cycle repeats. We covered the timing structure in [the intro post](/ashish-ai-blog/blog/verl-mental-model/#async-rollout); here we look at why the staleness is OK.
+
+<AsyncStaleness />
+
+The trainer at iteration $t$ has weights $\theta_t$. The rollout pool at iteration $t$ also has weights $\theta_t$ (transferred from the last iteration's update). The rollout pool generates batch $t+1$ using $\theta_t$. The trainer simultaneously updates $\theta_t \to \theta_{t+1}$ on batch $t$.
+
+At iteration $t+1$:
+- The trainer has $\theta_{t+1}$ and is about to train on batch $t+1$ (generated by $\theta_t$).
+- The "old" policy in the IS ratio is $\theta_t$ (the rollout policy).
+- The "new" policy being trained is $\theta_{t+1}$.
+
+The IS ratio $\rho = \pi_{\theta_{t+1}} / \pi_{\theta_t}$ is the same shape as in synchronous PPO, just shifted by one step. PPO's clip ($\epsilon \approx 0.2$) handles this drift. As long as $\theta_{t+1}$ is within trust-region distance of $\theta_t$, the gradient is unbiased modulo the clip.
+
+The cost is: with the same $\epsilon$ and the same `ppo_epochs`, more tokens hit the clip in one-step-off than in fully on-policy. Empirically, throughput gains (1.4-1.6× on typical workloads) outweigh the slight sample inefficiency.
+
+When one-step-off breaks: if your task has a sharp reward boundary and the policy is moving fast (large LR, few epochs), staleness can cause oscillation. Drop to fully synchronous to debug, then re-enable.
+
+## §4 — Fully async: variable staleness
+
+Fully async drops the "exactly one step" guarantee. The rollout pool generates continuously; the trainer consumes batches as they finish. Staleness can be anywhere from 1 to N steps, depending on rollout duration variance.
+
+The math gets harder. The IS ratio is now $\pi_{\theta_t} / \pi_{\theta_{t-k}}$ where $k$ varies per sample. The PPO clip still works, but you need to track which weights generated which sample.
+
+VERL's implementation:
+- Tag each generated sample with the weights-version it came from.
+- At training time, the IS ratio uses the recorded old log-probs (taken when the sample was generated).
+- The clip handles the drift; samples that drifted too far are clipped out (effectively dropped).
+
+Three practical concerns at this level of async:
+
+1. **Bookkeeping overhead.** Tracking weights-versions per sample adds a few percent to the trainer's runtime. Small but real.
+2. **The trainer can starve.** If rollout is faster than training, samples queue up. If training is faster, the trainer waits. You need to size the rollout and training pools to roughly match throughput.
+3. **Replay buffer semantics.** Some setups maintain a buffer of recent samples and re-sample from it; this is closer to off-policy RL than vanilla PPO. The IS correction gets more complex.
+
+Reported throughput gains over one-step-off: 20-40% additional, on top of the 20-40% one-step-off gained over sync. So fully async ≈ 1.7-2.2× over sync. The price is engineering complexity.
+
+## §5 — Communication patterns and NCCL primitives
+
+At scale, you spend more time in collectives than in matmuls. Knowing what each NCCL primitive costs is essential.
+
+<NCCLPrimitives />
+
+The primitives, with their cost models:
+- **broadcast**: one rank sends to all others. Cost $\sim$ data size / bandwidth.
+- **all-reduce**: every rank contributes; every rank gets the sum. Ring-reduce: $2(N-1)/N \cdot$ data / bandwidth. Tree-reduce: $\log N \cdot$ data / bandwidth.
+- **all-gather**: every rank contributes a shard; every rank gets the full thing. Same cost as all-reduce.
+- **reduce-scatter**: inverse of all-gather. Same cost.
+- **point-to-point send/recv**: rank A → rank B. Just data / bandwidth.
+
+For FSDP per layer: 1 all-gather (forward) + 1 all-gather (backward) + 1 reduce-scatter (gradient). Three collectives per layer, each O(param_size / N · 2(N-1)/N). For a 60-layer 70B model on 32 GPUs, this adds up.
+
+For Megatron TP: 2 all-reduces per matmul (the row-parallel and column-parallel halves). Hot loop.
+
+For Megatron PP: point-to-point activations between stages.
+
+For resharding: usually a broadcast pattern (training side gathers, rollout side receives).
+
+Bandwidth-wise: NVLink within a node is ~600 GB/s; InfiniBand between nodes is ~200 GB/s. Cross-node is 3× slower. This is why TP stays within nodes (heavy collective traffic) and PP/DP cross nodes (lighter traffic).
+
+## §6 — Memory budgeting
+
+What does memory at scale look like? The buckets, per GPU:
+
+<MemoryBudget />
+
+For a 70B model on 32 GPUs (FSDP, BF16):
+- **Parameters**: 140GB / 32 = 4.4GB per GPU.
+- **Gradients**: 4.4GB per GPU (same shape, sharded).
+- **Optimizer state (AdamW)**: 4× param size for the full optimizer state. With FSDP, sharded: 4 × 4.4 = 17.6GB per GPU.
+- **Activations**: depends on batch size and sequence length. ~5-20GB typical with activation checkpointing.
+- **KV cache (rollout)**: large. Tens of GB per GPU at high concurrency.
+- **NCCL workspace, CUDA overhead**: 1-3GB.
+
+Total typical: ~50-60GB per GPU on H100 (80GB). The remaining headroom is consumed by all-gathers (transient full parameters) and other transient state.
+
+At 405B+, even with sharding, parameters alone become a major cost. You need TP on top of FSDP/Megatron to shard within layers too.
+
+## §7 — Profiling and benchmarking
+
+What to measure when training is slower than expected:
+
+**Per-iteration breakdown.** Wall time for each phase: rollout, log-prob, ref-log-prob, reward, advantage, training, resharding. VERL emits these by default to W&B. The first thing to check.
+
+**GPU utilization.** Should be >90% during the dominant phase. Lower indicates the GPU is waiting (memory bandwidth, communication, host code).
+
+**NCCL communication time.** Profilers (PyTorch Profiler, NVIDIA Nsight) attribute time to NCCL kernels. Spike during all-gathers is normal; sustained high % means communication-bound.
+
+**Flame graphs.** PyTorch Profiler's flame graph shows where time goes per CUDA stream. The pattern you want: continuous compute kernels, brief NCCL gaps. The anti-pattern: lots of small kernels, long Python overhead.
+
+**Memory traces.** Track allocated vs peak memory over the step. Peaks during all-gathers tell you about transient costs.
+
+Three classes of slowdown to recognize:
+- **Compute-bound**: GPU at 100%, no headroom. Lever: faster kernels, mixed precision, model surgery.
+- **Memory-bandwidth-bound**: GPU at 100% but it's reading/writing not computing. Lever: kernel fusion, fewer materializations.
+- **Communication-bound**: GPU idle, NCCL active. Lever: better topology, async overlap, fewer collectives.
+
+## §8 — Three case studies
+
+**Case A — 7B model, 8 H100s, FSDP + vLLM, GRPO, math RLVR.**
+Bottleneck: training-side compute (~50% of iteration). Rollout is ~30%. Resharding is fast (~3s). Async rollout gives 1.3× speedup (we hide the 30% rollout behind training).
+Optimal config: FSDP, vLLM, BF16, ppo_epochs=2, rollout.n=8.
+
+**Case B — 70B model, 32 H100s (4 nodes), Megatron + SGLang, GRPO, helpfulness.**
+Bottleneck: resharding (~25s per iteration on a 60s total iteration). Rollout is ~15s. Training is ~20s.
+Without async: resharding dominates wall time.
+With one-step-off async: resharding overlaps with training. Effective wall time drops from 60s to ~38s. 1.6× speedup.
+With fully async: ~32s. 1.9× speedup over sync.
+Optimal config: Megatron TP=8 PP=2, SGLang for prefix caching, one-step-off as starting point, fully async if engineering allows.
+
+**Case C — 13B multi-turn agent, 8 H100s, FSDP + SGLang, GRPO + DAPO.**
+Bottleneck: tool latency. The calculator tool takes ~500ms per call. Multi-turn rollouts average 6 tool calls. So 3s of waiting per rollout, on top of generation time.
+Lever isn't async rollout — it's *tool optimization*. Cache repeated calls. Parallelize across the batch. The training-side compute is already well-utilized.
+Optimal config: SGLang (RadixAttention is huge here — every turn's prompt is "prior turns + new" → near-perfect prefix-cache hits). FSDP. Aggressive tool parallelization.
+
+The pattern across all three: **the optimal stack depends on which phase dominates, and that depends on the workload, not just the model size.**
+
+## §9 — The critical path
+
+The framing that pulls everything together: at each scale, identify the *critical path* — the longest sequence of operations that determines iteration time — and attack the longest segment.
+
+<CriticalPath />
+
+At 7B, the critical path is mostly training. Async rollout pulls rollout off the critical path; it now runs concurrently. Critical path shortens. Repeat for the next-longest segment.
+
+At 70B, the critical path is training → reshard → rollout. Async rollout pulls *some* rollout off the path. Resharding remains. In-flight dtype conversion (BF16 → FP8) shrinks the reshard segment. Repeat.
+
+At 405B, every segment matters. There's no single big lever. You optimize incrementally: 5% off communication here, 10% off reshard there, 3% off optimizer step. The compounding adds up.
+
+## §10 — Practical ceilings
+
+Where async stops helping:
+
+- When rollout is already much shorter than training. The trainer is busy 90% of the iteration; hiding the 10% behind it gains 11%, not 50%.
+- When resharding is the binding constraint and async can't hide it (the trainer needs the weights to finish, and the rollout needs the new weights before starting).
+- When the bookkeeping cost of fully-async tracking outweighs the savings (rare but happens with very small batch sizes).
+
+Where async stops being safe:
+- Very high learning rates. The drift between rollout policy and trainer policy compounds; clipping handles steady-state but not transients.
+- Very few PPO epochs. With ppo_epochs=1, you're already effectively on-policy; async adds staleness for no benefit.
+- Tight reward boundaries. A reward function with sharp transitions can oscillate under staleness.
+
+The rule of thumb: start synchronous to validate the training. Switch to one-step-off when you're confident the algorithm is stable. Move to fully async only when one-step-off is leaving real throughput on the table.
+
+## §11 — A mental model
+
+Scaling LLM RL is *not* "make training faster." It's "shorten the critical path." The longest segment of work in each iteration determines the iteration time. As you scale, the longest segment migrates — from training compute to rollout to resharding to communication — and the right engineering response shifts with it.
+
+VERL gives you the tools to apply each response: FSDP and Megatron for training topologies, vLLM/SGLang for rollout, 3D-HybridEngine for resharding, async-policy modes for hiding latency. The framework's job is to make these composable. Your job is to know which lever applies to your workload.
+
+Most setups don't need to think this hard. Below 70B, the defaults work. At 70B+, you start needing to read the profiler. At 405B+, you're solving a different problem — one of distributed systems engineering as much as RL.
+
+The [next and final post in this series](/ashish-ai-blog/blog/verl-debugging-evaluation/) covers the operational side: what to log during training, how to recognize failure modes from their fingerprints on metrics dashboards, and how to debug a training run that's underperforming.
+
+## References
+
+- Sheng, G., Zhang, C., Ye, Z., Wu, X., Zhang, W., Zhang, R., Peng, Y., Lin, H., Wu, C. (2024). *HybridFlow: A Flexible and Efficient RLHF Framework.* [arXiv:2409.19256](https://arxiv.org/abs/2409.19256). (VERL's design paper.)
+- Narayanan, D., Shoeybi, M., Casper, J., et al. (2021). *Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM.* [arXiv:2104.04473](https://arxiv.org/abs/2104.04473).
+- [SkyRL async rollout discussion](https://novasky-ai.notion.site/) (SkyRL-v0 / NovaSky).
+- [VERL one-step-off-policy source](https://github.com/verl-project/verl/tree/main/verl/experimental/one_step_off_policy).
+- [NCCL documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html).

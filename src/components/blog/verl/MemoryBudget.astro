@@ -1,0 +1,236 @@
+---
+// Viz — Memory budget treemap. Show GPU memory broken down by category.
+// Slider for batch size / sequence length.
+---
+
+<figure class="mb-figure" aria-label="GPU memory budget">
+  <div class="mb-controls">
+    <label class="mb-slider">
+      <span class="mb-label">batch size</span>
+      <input type="range" min="1" max="64" step="1" value="16" data-control="batch" />
+      <output data-readout="batch">16</output>
+    </label>
+    <label class="mb-slider">
+      <span class="mb-label">sequence length (k tokens)</span>
+      <input type="range" min="1" max="32" step="1" value="4" data-control="seq" />
+      <output data-readout="seq">4k</output>
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="mb-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="boxes"></g>
+    <g data-region="title-area"></g>
+  </svg>
+
+  <div class="mb-readouts">
+    <div class="mb-stat"><span class="mb-label">total used</span><strong data-readout="total">—</strong></div>
+    <div class="mb-stat"><span class="mb-label">H100 budget</span><strong>80 GB</strong></div>
+    <div class="mb-stat"><span class="mb-label">headroom</span><strong data-readout="headroom">—</strong></div>
+  </div>
+
+  <figcaption>
+    Memory budget for a single GPU running a 70B model with FSDP, BF16, AdamW. Adjust batch size
+    and sequence length to see activations grow. Once headroom turns red, you're past the
+    practical budget — you\'ll get OOMs or have to reduce batch.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // Model: 70B, FSDP across 32 GPUs
+    const PARAMS_GB = 140 / 32;   // BF16 params, sharded
+    const GRADS_GB = PARAMS_GB;    // Same shape, sharded
+    const OPT_GB = 4 * PARAMS_GB;  // AdamW: m + v + master copy + extra (4×)
+    const FIXED_OVERHEAD_GB = 2;   // CUDA workspace, NCCL buffers
+
+    document.querySelectorAll<HTMLElement>('.mb-figure').forEach((fig) => {
+      const boxesG = fig.querySelector<SVGGElement>('[data-region="boxes"]')!;
+      const titleG = fig.querySelector<SVGGElement>('[data-region="title-area"]')!;
+      const batchInput = fig.querySelector<HTMLInputElement>('[data-control="batch"]')!;
+      const seqInput = fig.querySelector<HTMLInputElement>('[data-control="seq"]')!;
+      const batchReadout = fig.querySelector<HTMLOutputElement>('[data-readout="batch"]')!;
+      const seqReadout = fig.querySelector<HTMLOutputElement>('[data-readout="seq"]')!;
+      const totalEl = fig.querySelector<HTMLElement>('[data-readout="total"]')!;
+      const headroomEl = fig.querySelector<HTMLElement>('[data-readout="headroom"]')!;
+
+      function render() {
+        const batch = parseInt(batchInput.value, 10);
+        const seqK = parseInt(seqInput.value, 10);
+        batchReadout.value = String(batch);
+        seqReadout.value = seqK + 'k';
+
+        // Activations scale roughly linearly with batch × seq (with activation checkpointing)
+        const activationsGB = 0.005 * batch * seqK * 32; // rough heuristic
+        const kvCacheGB = 0.002 * batch * seqK * 80;     // rough rollout-side estimate
+
+        const buckets = [
+          { name: 'params (sharded)', gb: PARAMS_GB, color: '#4a78c2' },
+          { name: 'gradients (sharded)', gb: GRADS_GB, color: '#6cabc7' },
+          { name: 'optimizer state', gb: OPT_GB, color: '#d08a3e' },
+          { name: 'activations', gb: activationsGB, color: '#4a8a3d' },
+          { name: 'KV cache (rollout)', gb: kvCacheGB, color: '#6b4ab8' },
+          { name: 'CUDA / NCCL overhead', gb: FIXED_OVERHEAD_GB, color: '#8a8a8a' },
+        ];
+
+        const total = buckets.reduce((a, b) => a + b.gb, 0);
+        const budget = 80;
+        const headroom = budget - total;
+
+        boxesG.replaceChildren();
+        titleG.replaceChildren();
+
+        el('text', { x: 360, y: 22, class: 'mb-title', 'text-anchor': 'middle' }, titleG).textContent = 'per-GPU memory (H100 80GB)';
+
+        const Y_BASE = 280;
+        const Y_TOP = 50;
+        const PLOT_H = Y_BASE - Y_TOP;
+        const X_START = 60;
+        const X_END = 700;
+        const PLOT_W = X_END - X_START;
+        const PIXELS_PER_GB = PLOT_H / 80;
+
+        // Draw the 80GB budget rectangle (background)
+        el('rect', { x: X_START, y: Y_TOP, width: PLOT_W, height: PLOT_H, class: 'mb-budget' }, boxesG);
+
+        // Stacked bars
+        let yCursor = Y_BASE;
+        let xLegend = X_START;
+        buckets.forEach((b, i) => {
+          const h = b.gb * PIXELS_PER_GB;
+          yCursor -= h;
+          el('rect', { x: X_START, y: yCursor, width: PLOT_W, height: h, fill: b.color, opacity: 0.85 }, boxesG);
+          if (h > 18) {
+            el('text', {
+              x: X_START + 12, y: yCursor + h / 2 + 4,
+              class: 'mb-seg-name'
+            }, boxesG).textContent = b.name;
+            el('text', {
+              x: X_END - 12, y: yCursor + h / 2 + 4,
+              class: 'mb-seg-value', 'text-anchor': 'end'
+            }, boxesG).textContent = `${b.gb.toFixed(1)} GB`;
+          }
+        });
+
+        // Mark the 80GB line
+        if (total > budget) {
+          // Show overflow indicator
+          el('line', { x1: X_START, x2: X_END, y1: Y_TOP, y2: Y_TOP, class: 'mb-budget-line mb-budget-line-over' }, boxesG);
+        }
+
+        totalEl.textContent = `${total.toFixed(1)} GB`;
+        if (headroom < 0) {
+          headroomEl.textContent = `${headroom.toFixed(1)} GB (OOM!)`;
+          headroomEl.className = 'mb-warn';
+        } else if (headroom < 10) {
+          headroomEl.textContent = `${headroom.toFixed(1)} GB (tight)`;
+          headroomEl.className = 'mb-caution';
+        } else {
+          headroomEl.textContent = `${headroom.toFixed(1)} GB`;
+          headroomEl.className = '';
+        }
+      }
+
+      batchInput.addEventListener('input', render);
+      seqInput.addEventListener('input', render);
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .mb-figure { margin: 2.5rem 0; max-width: 880px; }
+  .mb-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+  }
+  @media (max-width: 640px) { .mb-controls { grid-template-columns: 1fr; } }
+  .mb-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .mb-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .mb-slider input[type="range"] { accent-color: var(--accent); }
+  .mb-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 2.5rem;
+    text-align: right;
+  }
+  .mb-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .mb-figure :global(.mb-budget) {
+    fill: var(--code-bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+  }
+  .mb-figure :global(.mb-seg-name) {
+    fill: white;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+  .mb-figure :global(.mb-seg-value) {
+    fill: white;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .mb-figure :global(.mb-budget-line-over) {
+    stroke: #b85c5c;
+    stroke-width: 2;
+  }
+  .mb-figure :global(.mb-title) {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-sans);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .mb-readouts {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; margin-top: 0.85rem;
+  }
+  @media (max-width: 640px) { .mb-readouts { grid-template-columns: 1fr; } }
+  .mb-stat {
+    padding: 0.55rem 0.8rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  .mb-stat .mb-label {
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .mb-stat strong {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    color: var(--text);
+  }
+  .mb-stat strong.mb-warn { color: #b85c5c; }
+  .mb-stat strong.mb-caution { color: #d08a3e; }
+</style>
