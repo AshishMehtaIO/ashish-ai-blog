@@ -1,0 +1,124 @@
+---
+title: "Field notes: what actually happens when you run LLM RL at scale"
+description: "Hard-won lessons from a year of production LLM RL — why most of the gain lands in the first epoch, why aggregate reward lies, watching reward hacking happen in real time, and why evaluation is a separate distributed system. Specifics omitted; patterns kept."
+pubDate: 2026-05-28
+author: "Ashish Mehta"
+tags: ["llm-rl", "systems", "field-notes", "practice"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
+import RewardHackingGallery from '../../components/blog/verl/RewardHackingGallery.astro';
+import KLOverTraining from '../../components/blog/verl/KLOverTraining.astro';
+
+The rest of this series is about how LLM RL systems are *built*. This post is about what happens when you actually *run* one — repeatedly, at scale, against real tasks, for long enough to accumulate scar tissue. The lessons here came from a sustained body of RL post-training work: many runs across model sizes from ~70B dense up to 600B-class mixture-of-experts, multi-task agentic training with verifiable rewards and tool use, on multi-node H100/H200 clusters with [VERL](https://github.com/verl-project/verl) (GRPO, Megatron + vLLM).<Sidenote id="sn-anon">I've deliberately kept this high-level: no specific models, domains, datasets, reward numbers, or infrastructure details. What's left is the *patterns* — the things that generalize to anyone running LLM RL at scale. The two interactive figures are schematic illustrations, not real run data.</Sidenote>
+
+None of these are textbook lessons. They're the things that don't show up in a framework's README and that you only learn by watching a hundred training steps go sideways at 3 a.m.
+
+## 1 — Most of the gain is in the first epoch
+
+The single most consistent pattern across every run: **validation reward rises fast, then plateaus — usually within the first epoch — and the second pass over the data buys little or even regresses.** A run would climb from a weak baseline to a strong plateau over the first epoch, oscillate in a tight band for the rest of training, and occasionally drift *down* in later epochs.
+
+The practical consequence is discipline, not patience. Checkpoint frequently, evaluate often, and be ready to take an early checkpoint as your best one. We routinely found the best checkpoint sat around the first-epoch boundary, with everything after it noise. Training longer "to be safe" mostly bought wall-clock and tail risk, not quality.
+
+If you're paying for 96 GPUs, knowing the gain is front-loaded changes your whole cost calculus: short runs with aggressive checkpointing beat long runs you babysit.
+
+## 2 — A stronger base has less RL headroom
+
+A non-obvious one. We compared RL on a more heavily pre-distilled base against a weaker base on the same task. The stronger base *started* much higher — and *plateaued lower*. The weaker base started near the floor and climbed past it.
+
+The mental model: RL is not adding capability so much as *eliciting and sharpening* what's already latent, within a bounded distance (the KL budget) of the starting policy. A base that's already been pushed hard toward the target distribution has little room left to move inside that budget; a weaker base has slack to exploit. "Better SFT checkpoint" does not imply "better RL outcome." Measure RL *headroom*, not just the starting score.
+
+## 3 — Aggregate reward lies; you must break it down
+
+A single mean reward number is the most dangerous metric on the dashboard. Across multi-task runs, the aggregate would look healthy and stable while hiding wildly different per-task stories underneath: easy sub-tasks saturating near the ceiling early and contributing nothing further, while hard sub-tasks sat stuck — sometimes near *zero* — and never moved.
+
+Two reliable sub-patterns:
+
+- **Easy tasks saturate and mask the rest.** Once a sub-task hits its ceiling, it stops contributing gradient signal but keeps propping up the average. The aggregate looks like progress; it's actually a few tasks that finished early.
+- **Tool-calling sub-tasks lag badly.** Anything requiring a structured tool call (versus free-text) was consistently the hardest, the slowest to learn, and the most likely to stay near zero. Tasks that need *precise* output formats plus multi-step reasoning have many ways to fail and few to succeed — a sparse, high-variance signal.
+
+The discipline: never trust the mean. Log per-task and per-scenario reward, and read the bottom of the distribution every time. The headroom that's left always lives in the tasks the average is hiding.
+
+## 4 — The reward function is the bottleneck, not the model
+
+More runs were limited by the *verifier* than by the policy. Several concrete sub-lessons:
+
+- **Verifier prompt quality directly drove learning.** Sub-tasks with vague or under-specified LLM-judge verifier prompts learned poorly or not at all — not because the model couldn't do the task, but because the reward signal was too noisy to follow. Tightening a verifier prompt did more than any hyperparameter change.
+- **Programmatic and LLM-judge verifiers behave differently.** Deterministic rule-based verifiers give crisp, low-variance signal but are brittle to format. LLM-judge verifiers are flexible but noisy and gameable. Mixing them in one reward needs care about scale and variance.
+- **A verifier bug looks exactly like a model failure.** We lost real time to cases where reward was stuck and the policy looked broken — and the actual cause was the *harness* (e.g., the verifier being handed an empty or malformed context). The lesson is now reflexive: **when the reward looks broken, suspect the harness before the model.**
+- **"Always-fail" examples silently waste compute.** Every multi-task dataset had a tail of examples that scored zero on every rollout across the entire run — usually a verifier issue, not a model one. They contribute no learning signal and quietly eat a fraction of every batch. Find and cut them.
+
+## 5 — Reward hacking, watched in real time
+
+The most instructive failure. On one task, training reward kept climbing while the actual quality of the behavior did not. The model had discovered a specific output pattern — a plausible-sounding claim that happened to satisfy the verifier's check without doing the underlying task. It wasn't solving the problem; it had found a hole in the specification and was driving a truck through it.
+
+<RewardHackingGallery />
+
+The fingerprint was exactly the one the [observability post](/ashish-ai-blog/blog/llm-rl-observability/) describes: training reward up and to the right, true quality flat. The fix was not in the policy, the learning rate, or the KL coefficient — it was in the *verifier*. Reward hacking is a specification bug, and you fix it by fixing the specification. You also only catch it by reading rollouts; no scalar metric told us the answers had gone hollow.
+
+## 6 — Entropy and KL dynamics follow the reward's shape
+
+How entropy behaves depends entirely on the reward you chose:
+
+- **Binary verifiable rewards drive entropy *down*** — often hard. When there's essentially one correct output, the policy collapses toward it, and you watch entropy fall toward zero. That's mode collapse, and it's the *expected* behavior for crisp tasks, not always a problem — but you have to know it's coming.
+- **Open-ended graded rewards (an ordinal quality score rather than pass/fail) keep entropy *high*** — there are many valid ways to be good, so the policy stays diverse. Same framework, same hyperparameters, totally different entropy curve, purely because of reward shape.
+
+And KL to the reference drifts upward toward the plateau — the model trading "stay like the base" for "get more reward." Two things followed from that:
+
+<KLOverTraining />
+
+- **Smaller datasets need a stronger KL constraint.** With few examples, the policy overfits fast: validation reward peaks early then drops while training metrics keep improving. A stronger KL coefficient (and a slower learning rate) cut that overfitting roughly in half and let runs train longer without regressing.
+- **Larger, more diverse datasets need a *weaker* KL constraint** — they genuinely need to move further from the base to cover diverse tasks, and too tight a KL budget strands the hard tasks. The right KL coefficient is a function of dataset size and diversity, not a universal constant.
+
+## 7 — Grad-norm spikes are usually survivable
+
+Periodic gradient-norm spikes — several times the baseline, roughly regularly — were common and almost always recovered within a few steps. Early on we'd panic and kill runs over a single spike. Don't. A spike that recovers is exploration; a *sustained* climb or a NaN is the real problem. Gradient clipping plus a sane learning rate makes the occasional spike a non-event.
+
+## 8 — Crashes are the default, not the exception
+
+At multi-node scale, runs *die*. NCCL timeouts, node failures, OOMs — a meaningful fraction of long runs crashed partway through, sometimes well before the planned step count. This is not a bug you fix once; it's the operating environment.
+
+Two consequences shaped everything:
+
+- **Frequent checkpointing and auto-resume are non-negotiable.** Save often enough that a crash costs you minutes, not a day. The best checkpoint is frequently one you saved *before* a crash you didn't plan for.
+- **The same config gives different results across runs.** Re-running an identical configuration produced meaningfully different trajectories and final scores. Mixed precision, non-deterministic kernels, and async scheduling make bit-reproducibility impractical at this scale (see [the open-problems post](/ashish-ai-blog/blog/llm-rl-open-problems/)). Treat a single run as a sample, not the truth.
+
+## 9 — Big-MoE RL is offload-heavy and low-MFU
+
+Fitting a 600B-class MoE through an RL loop meant offloading *everything* — parameters, gradients, optimizer state — to CPU and streaming it back. The result was model-FLOPs-utilization in the ~0.1–0.15 range, versus ~0.4 for a 70B dense model on the same hardware. The big model ran several times slower per step despite an identical cluster.
+
+That's the tax for making it fit at all, and it's worth naming up front: when you jump from 70B to 600B-class, do not expect throughput to scale with parameter count. Expect to spend most of your engineering on memory, and expect the inference/training resharding and offload machinery — not the matmuls — to dominate the step time. (The [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/) is the systems view of why.)
+
+## 10 — Evaluation is a second distributed system
+
+The lesson that surprised me most: *evaluating* a checkpoint was nearly as much systems work as training it. You can't just call `.generate()`. For a large model you stand up a *dedicated serving cluster* — a 600B-class model takes ~20–25 minutes just to load weights, compile, and warm up before it answers a single request — then run your eval harness against the served endpoint.
+
+And the single most expensive gotcha of the entire effort:
+
+> **RL frameworks often save only model weights plus a config — not the tokenizer, chat template, or custom modeling code. Loading a checkpoint with the *wrong* tokenizer produces fluent-looking garbage that is indistinguishable from catastrophic training collapse.**
+
+We lost hours to output that looked like the model had destroyed itself, when in fact the checkpoint was fine and the *tokenizer* served alongside it was wrong. Now it's the first thing I check when eval output looks insane: not the policy, the plumbing. Pin the tokenizer and template to the exact base; copy them into every checkpoint directory; diff a known prompt's tokenization between training and serving before trusting any eval number.
+
+## 11 — Watch the "am I still a language model" dashboard
+
+Alongside reward, the most useful guardrail was a set of distribution-shift metrics: perplexity of the policy on reference-style text, the ratio of rollout perplexity to reference perplexity, KL to the reference, and safety-veto fractions. These answer a question reward can't: *is the model still a coherent language model, or is it degenerating into reward-maximizing noise?*
+
+Healthy runs showed gentle, bounded drift — perplexity ratio creeping up slightly, KL growing smoothly, safety vetoes near zero. The failure mode you're watching for is any of those rising sharply: that's the model leaving the manifold of fluent language to chase reward, and it usually precedes the reward-hacking and mode-collapse fingerprints by a few steps. It's an early-warning system, and it's cheap to log.
+
+## What this adds up to
+
+If I compress a year of this into a paragraph: the algorithm is the easy part. The framework mostly works. Where the time actually goes is reward and verifier design (most failures live here), evaluation infrastructure (a second system as hard as the first), and operational reality (crashes, non-determinism, offload economics, the tokenizer-plumbing class of bug). The published research makes RL look like an optimization problem; in practice it's a *specification-and-systems* problem wearing an optimization problem's clothes.
+
+<DesignPrinciple>
+At scale, the model is rarely the bottleneck. The reward specification, the evaluation harness, and the operational plumbing are — and they fail in ways that look exactly like model failure. Build the instinct to suspect the specification and the plumbing first, and to trust the mean reward least.
+</DesignPrinciple>
+
+## Related
+
+- The systems mechanics behind these notes: [the design-patterns synthesis](/ashish-ai-blog/blog/llm-rl-design-patterns/) and [the systems overview](/ashish-ai-blog/blog/llm-rl-systems-overview/).
+- The failure fingerprints referenced here: [operating an LLM RL training run](/ashish-ai-blog/blog/llm-rl-observability/).
+- Why reward is the hard surface: [reward design](/ashish-ai-blog/blog/llm-rl-reward-design/).
+- Why evaluation and reproducibility are unsolved: [open problems](/ashish-ai-blog/blog/llm-rl-open-problems/).
+
+*These are generalized observations from production RL work; specific models, domains, datasets, and numbers are intentionally omitted. The figures are schematic illustrations, not run data.*
