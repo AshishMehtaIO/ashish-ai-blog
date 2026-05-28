@@ -1,0 +1,106 @@
+---
+title: "What LLM RL frameworks haven't solved yet"
+description: "A research agenda for LLM RL systems: first-class process rewards, multi-agent training, off-policy correction beyond one step, multi-modal RL, reward-hacking detection, deterministic distributed debugging, and train-vs-serve divergence."
+pubDate: 2026-05-28
+author: "Ashish Mehta"
+tags: ["llm-rl", "systems", "open-problems", "research-agenda"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
+import ORMvsPRM from '../../components/blog/verl/ORMvsPRM.astro';
+import AsyncStaleness from '../../components/blog/verl/AsyncStaleness.astro';
+
+The rest of this series describes the patterns LLM RL frameworks have converged on. This post is the negative space: the problems they *haven't* solved. Each is a place where today's frameworks — [VERL](https://github.com/verl-project/verl), TRL, OpenRLHF, NeMo RL, AReaL, slime, Miles — either punt, paper over, or leave to the user. Collected, they read as a research agenda.<Sidenote id="sn-agenda">These are drawn from the "limitations" section that closes each post in the series, consolidated and sharpened. Where a partial solution exists, I name it; where the problem is genuinely open, I say so. The framing is deliberately a to-do list for the field, not a complaint about any one framework.</Sidenote>
+
+A note on selection. I've left out problems that are merely engineering grind (better kernels, more backends, tighter memory) and kept the ones that are *conceptually* unresolved — where it isn't yet clear what the right abstraction even is.
+
+## 1 — Process rewards as a first-class abstraction
+
+**The gap.** Every framework here is outcome-reward-first: one scalar at the end of a response. Process reward models (PRMs) — which score each reasoning step — are supported only as a do-it-yourself layer on top of the token-level reward tensor. None ships a first-class PRM abstraction: a way to declare "this is a step-level reward model, here is how to segment responses into steps, here is how to credit-assign across them."
+
+<ORMvsPRM />
+
+**Why it's hard.** Step segmentation is task-specific and ambiguous. Step-level labels are expensive. And PRMs introduce their own reward-hacking surface (the policy games the step scorer). A real solution needs a segmentation interface, a credit-assignment policy, and PRM-specific eval — none of which has a settled design.
+
+**What a solution looks like.** A `ProcessReward` interface as clean as today's outcome-reward callback: declare the step delimiter, the scorer, and the credit rule; the framework handles placement into the token-level tensor and the matching advantage computation. Covered as an extension surface in [the reward-design post](/ashish-ai-blog/blog/llm-rl-reward-design/).
+
+## 2 — Off-policy correction beyond one step
+
+**The gap.** Async training (the [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/)'s central lever) makes training data stale. Today's frameworks rely on PPO's importance-sampling clip to absorb the drift, which works for *one* step of staleness and degrades as staleness grows. Fully-async modes that allow multi-step staleness lean on the same clip past the regime where it's principled.
+
+<AsyncStaleness />
+
+**Why it's hard.** The clip is a blunt instrument: it discards drifted samples rather than correcting them. Principled off-policy correction — [V-trace](https://arxiv.org/abs/1802.01561)-style importance weighting, or a learned correction — exists in classic RL but hasn't been cleanly adapted to the token-level, long-sequence LLM setting where the per-token ratios compound.
+
+**What a solution looks like.** A staleness-aware advantage estimator that corrects rather than clips, making the throughput/quality trade of async a smooth dial instead of a cliff. AReaL's bounded-staleness work is the closest the field has come; the general case is open.
+
+## 3 — Multi-agent and self-play training
+
+**The gap.** Every framework optimizes a single policy against a fixed reward. Multi-agent RL — two policies co-trained (debate, negotiation, adversarial games), or self-play where the opponent is a past checkpoint — has no shared infrastructure. Miles's multi-agent co-training is an early move; it is not yet a general abstraction.
+
+**Why it's hard.** Multi-agent breaks the single-policy assumption baked into the rollout and the advantage computation. You need parallel-policy rollout, opponent sampling/versioning, and credit assignment across agents — each touching the core loop the patterns assume is single-policy.
+
+**What a solution looks like.** A rollout abstraction that admits multiple policies and an opponent-pool manager, composing with the existing advantage-estimator interface rather than replacing it.
+
+## 4 — Multi-modal RL with mature abstractions
+
+**The gap.** Vision-language RL works in several frameworks (VERL, NeMo RL handle images), but the abstractions are thinner than the text-only path: reward functions, tool outputs, and rollout handling for images/audio/video are less standardized, and the examples are sparse.
+
+**Why it's hard.** Multi-modal inflates every part of the loop — tokenization, KV cache, reward computation, the response mask over interleaved modalities. The token-level-tensor abstractions that make text RL clean don't extend trivially to mixed-modality sequences.
+
+**What a solution looks like.** First-class modality handling in the rollout and reward interfaces — `ToolResponse` carrying images is a start; the advantage/mask machinery needs matching multi-modal semantics.
+
+## 5 — Reward-hacking detection as built-in tooling
+
+**The gap.** Reward hacking is the dominant failure mode ([the reward post](/ashish-ai-blog/blog/llm-rl-reward-design/) names five patterns; [the observability post](/ashish-ai-blog/blog/llm-rl-observability/) gives their fingerprints). Yet no framework ships *detection* — automated monitoring that flags "training reward is diverging from eval reward" or "response length is exploding" or "diversity is collapsing." Today it's all manual: read the rollouts, watch the dashboards.
+
+**Why it's hard.** Hacking is defined relative to *intent*, which the framework doesn't have access to. But many signatures are statistical and detectable (train/eval divergence, length/diversity drift, RM-score-vs-task-success gaps) without knowing intent.
+
+**What a solution looks like.** A monitoring layer that computes the known fingerprints and raises alerts — a "linter for reward hacking." It wouldn't catch everything, but catching the five named patterns automatically would save uncountable wasted GPU-hours.
+
+## 6 — Deterministic distributed debugging
+
+**The gap.** When a distributed run misbehaves, debugging is brutal: ranks disagree, hangs are opaque, and reproducibility is approximate at best ([the observability post](/ashish-ai-blog/blog/llm-rl-observability/) is candid that bit-exact reproducibility is rarely achievable). No framework offers a strong story for cross-rank introspection or deterministic replay.
+
+**Why it's hard.** Mixed precision, non-deterministic CUDA kernels, async scheduling, and clock-time-dependent collective ordering all inject non-determinism. Making a multi-node RL run bit-reproducible may require giving up performance most users won't sacrifice.
+
+**What a solution looks like.** A "debug mode" that trades speed for determinism — fixed kernel selection, synchronous scheduling, seed-pinned everything — plus cross-rank state capture on hang. Miles's Rollout Routing Replay (recording and replaying MoE routing decisions) is a fascinating point solution to one slice of this; the general capability doesn't exist.
+
+## 7 — Train-vs-serve divergence detection
+
+**The gap.** A model trained successfully can underperform in production because the serving pipeline tokenizes, templates, or samples differently than the training rollout did ([the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/) and [observability post](/ashish-ai-blog/blog/llm-rl-observability/) both flag this as a silent killer). Frameworks don't help you catch it.
+
+**Why it's hard.** It spans two systems — the training framework and the (separate) serving stack — that no single tool owns. The divergence is often in subtle places: a BOS token, a chat-template version, a sampling default.
+
+**What a solution looks like.** A diff harness that runs the same prompts through training-time rollout and production serving and flags token-level divergence — a contract test between the two pipelines.
+
+## 8 — The PRM × multi-turn intersection
+
+**The gap.** Two of the above (process rewards, multi-turn) intersect in an especially unsolved place: per-step rewards *across turns* in an agent trajectory. Crediting a multi-turn agent for good intermediate reasoning, good tool selection, and good final answers — separately and correctly — combines the segmentation problem with the multi-turn credit-assignment problem. No framework has a clean answer.
+
+**Why it's hard.** It's the hardest credit-assignment setting in the field: dense, multi-level, across a branching interaction. The response mask handles *which tokens*, but not *which rewards attach where* when rewards are both per-step and per-turn.
+
+**What a solution looks like.** Unknown — this is the genuinely open frontier. It likely requires advances in both the reward abstraction (problem 1) and off-policy correction (problem 2) before it's tractable.
+
+## The shape of the agenda
+
+Read together, the open problems cluster:
+
+- **Reward sophistication** (1, 5, 8): the field can specify outcome rewards well and process/dense/multi-level rewards poorly.
+- **Off-policy theory** (2, 3): async and multi-agent both push past the on-policy assumption the patterns quietly rely on, and the correction machinery hasn't caught up.
+- **Operational maturity** (5, 6, 7): the tooling for *running* these systems — detection, debugging, contract-testing — lags the tooling for *building* them.
+- **Modality** (4): the clean text abstractions don't yet generalize.
+
+The convergence described in [the design-patterns post](/ashish-ai-blog/blog/llm-rl-design-patterns/) means the *construction* of LLM RL systems is largely solved. These eight are where the next round of work is — and any one of them, solved cleanly and made first-class, would be a genuine contribution to the field.
+
+<DesignPrinciple>
+A field's open problems are visible in what its tools make you do by hand. LLM RL frameworks make you hand-roll process rewards, hand-tune async staleness, hand-watch for reward hacking, and hand-diff training against serving. Each manual workaround is a research problem wearing a workaround's clothes.
+</DesignPrinciple>
+
+## References
+
+- V-trace / off-policy correction — Espeholt et al. (2018), [arXiv:1802.01561](https://arxiv.org/abs/1802.01561).
+- Process reward models — Lightman et al. (2023), [arXiv:2305.20050](https://arxiv.org/abs/2305.20050).
+- Reward hacking — Skalse et al. (2022), [arXiv:2209.13085](https://arxiv.org/abs/2209.13085).
+- The series chapters whose limitations this post consolidates: [reward design](/ashish-ai-blog/blog/llm-rl-reward-design/), [multi-turn](/ashish-ai-blog/blog/llm-rl-multi-turn/), [scaling](/ashish-ai-blog/blog/llm-rl-scaling/), [observability](/ashish-ai-blog/blog/llm-rl-observability/), and [the framework comparison](/ashish-ai-blog/blog/llm-rl-frameworks-compared/).

@@ -1,0 +1,104 @@
+---
+title: "Design patterns in LLM RL systems"
+description: "The patterns the field converged on: single-controller orchestration, algorithm-as-advantage-estimator, the rollout/training engine split with a resharding adapter, response-masked multi-turn, and bounded-staleness async. The spine of the series."
+pubDate: 2026-05-28
+author: "Ashish Mehta"
+tags: ["llm-rl", "systems", "design-patterns", "architecture"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
+import ControllerParadigms from '../../components/blog/verl/ControllerParadigms.astro';
+import DataflowGraph from '../../components/blog/verl/DataflowGraph.astro';
+import ReshardingViz from '../../components/blog/verl/ReshardingViz.astro';
+import ResponseMaskDeep from '../../components/blog/verl/ResponseMaskDeep.astro';
+import AsyncRolloutGantt from '../../components/blog/verl/AsyncRolloutGantt.astro';
+import RewardPipeline from '../../components/blog/verl/RewardPipeline.astro';
+
+LLM RL frameworks are a new kind of distributed system, and like any maturing class of system they have converged on a handful of recurring solutions. This post names them. Each pattern is framework-agnostic — it shows up in [VERL](https://github.com/verl-project/verl), TRL, OpenRLHF, NeMo RL, AReaL, slime, and Miles in various forms — but the rest of this series uses VERL as the worked example to see each one concretely.<Sidenote id="sn-spine">If the other posts are chapters, this is the spine: it states each pattern abstractly and points to the chapter that derives it in detail, and to the [framework comparison](/ashish-ai-blog/blog/llm-rl-frameworks-compared/) that shows it across the field. Read this first for the map, or last for the synthesis.</Sidenote>
+
+A "design pattern," here, means what it means in software architecture: a recurring problem, a forced choice in the solution space, and a resolution that keeps reappearing because the forces that produce it are intrinsic to the domain. The point of naming them is leverage — once you see the pattern, you can recognize it in a framework you've never used and predict where its sharp edges will be.
+
+## Pattern 1 — Single-controller orchestration over multi-controller compute
+
+**The problem.** An RL iteration is a heterogeneous pipeline: generate, score, estimate advantage, update — each phase wanting a different parallelism layout, different models resident, different hardware utilization. Pure SPMD (every GPU runs the same program in lockstep) is efficient but rigid; it has no natural way to express "now do this completely different phase." Pure single-controller (one driver issues every instruction) is flexible but becomes a coordination bottleneck.
+
+**The resolution.** A *hierarchy*: a single-controller driver orchestrates the phases (the "what"), and each phase runs as a multi-controller SPMD worker group internally (the "how"). The driver code reads like sequential Python; the parallelism is hidden inside worker-group method calls.
+
+<ControllerParadigms />
+
+**Across the field.** This is HybridFlow's central contribution, realized in VERL. Every framework targeting scale converges here: OpenRLHF, NeMo RL, AReaL, slime, and Miles all use Ray as the single-controller substrate over SPMD workers. TRL is the instructive exception — single-process, no central controller — which is exactly why it's the easiest to start with and the hardest to scale to disaggregated pools. The pattern is not free; it's the right trade when phases are heterogeneous, which in LLM RL they always are. Derived in detail in [the systems-overview post](/ashish-ai-blog/blog/llm-rl-systems-overview/).
+
+## Pattern 2 — The algorithm is an advantage estimator plus config
+
+**The problem.** The algorithm zoo is large and growing — PPO, GRPO, RLOO, REINFORCE++, DAPO, and more arrive every few months. A framework that implements each as a bespoke training loop forks itself to death.
+
+**The resolution.** Recognize that these algorithms share a single skeleton — sample, score, estimate advantage, take a clipped gradient step — and differ in exactly one operator: how rewards become a per-token advantage. Make that operator a pluggable function; make the orthogonal choices (KL placement, clipping, loss aggregation) config flags. A new algorithm becomes a recipe, not a fork.
+
+<DataflowGraph />
+
+**Across the field.** VERL exposes this as `algorithm.adv_estimator` selecting one function in `core_algos.py`; DAPO landing as pure config is the proof. The frameworks built around this interface (VERL, AReaL, slime, NeMo RL) support the GRPO family cheaply; the ones rooted in classic RLHF (TRL, OpenRLHF) carry PPO as the center of gravity and add the rest around it. The dividing line in the [comparison](/ashish-ai-blog/blog/llm-rl-frameworks-compared/) — who supports DAPO/REINFORCE++ first-class — falls exactly along whether the framework internalized this pattern. Derived in [the algorithm-interface post](/ashish-ai-blog/blog/llm-rl-algorithm-interface/).
+
+## Pattern 3 — Two engines with opposite goals, bridged by a resharding adapter
+
+**The problem.** Generation wants paged KV caches, continuous batching, low-latency decode — the things vLLM and SGLang are built for. Training wants sharded gradients, optimizer state, mixed precision, collective communication — the things FSDP and Megatron are built for. These are opposite memory layouts and opposite performance profiles. One engine cannot serve both well.
+
+**The resolution.** Use two separate engines, each best-in-class for its half, and build an *adapter* that moves the policy's weights from the training layout to the inference layout every iteration — in-GPU, via collective communication, no disk roundtrip. The adapter is where the genuine systems engineering concentrates.
+
+<ReshardingViz />
+
+**Across the field.** VERL's 3D-HybridEngine is the worked example; the pattern is universal because the forces are. The differentiation is *which two engines*: the SGLang-first newcomers (AReaL, slime, Miles) versus the vLLM-era frameworks (VERL, OpenRLHF), and the DeepSpeed lineage (TRL, OpenRLHF) versus the Megatron+FSDP lineage (everyone else). The adapter's maturity — multi-node, dtype-converting, LoRA-aware — is a real axis of difference between frameworks even when the pattern is identical. Derived in [the engines post](/ashish-ai-blog/blog/llm-rl-engines/).
+
+## Pattern 4 — Multi-turn is a per-token mask plus tools
+
+**The problem.** A multi-turn agent rollout interleaves tokens the policy *produced* (its actions) with tokens it merely *observed* (tool and environment outputs). The loss must train on the former and condition on — but not train on — the latter. Done naively, this contaminates the gradient or forces a special multi-turn-aware loss.
+
+**The resolution.** Tag every token with a binary mask: 1 if the policy generated it, 0 otherwise. The loss, the advantage estimator, and the importance-sampling ratio all read the mask and ignore mask-0 positions. The entire downstream system stays single-turn-shaped; the mask absorbs the complexity. Tools, in turn, are the environment interface — a function the agent calls, its output injected as masked observation.
+
+<ResponseMaskDeep />
+
+**Across the field.** Multi-turn went from exotic to table-stakes between 2024 and 2026 — every actively-developed framework in the [comparison](/ashish-ai-blog/blog/llm-rl-frameworks-compared/) now treats it as first-class, and all of them rely on some form of the response-mask trick because it is the minimal correct primitive. The differentiation moved up a level, to *how tools and environments are expressed* (VERL's `@function_tool`, NeMo RL's environments, Miles's multi-agent co-training). Derived in [the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/).
+
+## Pattern 5 — Async with bounded staleness
+
+**The problem.** Synchronous RL alternates generation and training, leaving one pool idle while the other works — roughly half the hardware wasted. But fully decoupling them makes the training data *off-policy*: the trainer learns from samples generated by a stale policy, which breaks the on-policy assumption PPO leans on.
+
+**The resolution.** Overlap generation and training, but *bound the staleness*. One-step-off keeps the lag at exactly one update — small enough that PPO's importance-sampling clip absorbs the drift. Fully async lets staleness vary but tracks the policy version per sample so the clip still applies. The pattern trades a controlled amount of off-policy-ness for a large utilization gain.
+
+<AsyncRolloutGantt />
+
+**Across the field.** AReaL is the purest expression — its `max_head_offpolicyness` knob makes bounded staleness a first-class config dimension. OpenRLHF, NeMo RL, and slime all ship fully-async modes; VERL offers one-step-off and fully async. TRL, single-process by design, is the one framework with no async-overlap story. The universality of the pattern — and the convergence on *bounded* rather than unbounded staleness — is the field discovering the same trade-off independently. Derived in [the scaling post](/ashish-ai-blog/blog/llm-rl-scaling/).
+
+## Pattern 6 — Reward as a composition pipeline
+
+**The problem.** Real reward signals are not single functions. They combine rule-based verifiers, learned reward models, KL regularization, and shaping terms — and they must be computed for large batches without stalling the trainer.
+
+**The resolution.** Treat the reward as a *pipeline* that stacks contributions into one per-token tensor: rule-based score, plus model-based score, plus (optionally) per-token KL, landing in the array the advantage estimator consumes. Expose the user-facing surface as a plain function; let the framework handle batching, async dispatch, and composition.
+
+<RewardPipeline />
+
+**Across the field.** The interface shape varies — VERL and AReaL take a Python callable, NeMo RL makes the reward an *environment*, OpenRLHF supports an HTTP reward-model server — but the underlying pattern (compose multiple signals into one token-level reward, computed async) is shared. The variation is a genuine design choice about what the common case is. Derived in [the reward-design post](/ashish-ai-blog/blog/llm-rl-reward-design/).
+
+## The patterns compose
+
+These are not independent. They stack into the architecture every modern LLM RL framework approximates:
+
+> A single-controller driver (1) runs an iteration whose algorithm is one pluggable advantage estimator (2); each phase executes on the engine built for it, with weights resharded between training and inference layouts by an adapter (3); rollouts may be multi-turn, kept loss-compatible by a per-token mask (4), and may run async with bounded staleness for utilization (5); the reward feeding the whole thing is a composed pipeline (6).
+
+That sentence is the field's convergent design, as of 2026. A framework is largely characterized by which patterns it implements and how far it pushes each — which is exactly what the [comparison post](/ashish-ai-blog/blog/llm-rl-frameworks-compared/) measures.
+
+## Why convergence, and what it means
+
+When independent teams — at ByteDance, Hugging Face, NVIDIA, Ant, THUDM — arrive at the same six patterns, it is evidence the patterns are forced by the domain rather than by fashion. The forces are real: heterogeneous phases force the controller hierarchy; the algorithm zoo forces the estimator interface; opposite engine pressures force the adapter; interleaved trajectories force the mask; idle hardware forces async; composite signals force the pipeline.
+
+For a practitioner, the convergence is good news: learn the patterns once and you can read any framework. For a framework author, it relocates the competition — the patterns are commodity; the edges (resharding maturity, staleness control, environment abstractions, MoE-routing stability) are where the work now is. And for the field, it suggests the next round of progress will come from the patterns that *haven't* converged yet — which is the subject of [the open-problems post](/ashish-ai-blog/blog/llm-rl-open-problems/).
+
+<DesignPrinciple>
+A maturing systems field converges on a small set of patterns because the forces that produce them are intrinsic, not stylistic. Name the patterns and you get leverage: you can read an unfamiliar framework by which patterns it implements, and predict its sharp edges by how far it pushes each one.
+</DesignPrinciple>
+
+## References
+
+- VERL / HybridFlow — Sheng et al. (2024), [arXiv:2409.19256](https://arxiv.org/abs/2409.19256).
+- The chapters this post synthesizes: [systems overview](/ashish-ai-blog/blog/llm-rl-systems-overview/), [algorithm interface](/ashish-ai-blog/blog/llm-rl-algorithm-interface/), [reward design](/ashish-ai-blog/blog/llm-rl-reward-design/), [multi-turn](/ashish-ai-blog/blog/llm-rl-multi-turn/), [environments](/ashish-ai-blog/blog/llm-rl-environments/), [engines](/ashish-ai-blog/blog/llm-rl-engines/), [scaling](/ashish-ai-blog/blog/llm-rl-scaling/), [observability](/ashish-ai-blog/blog/llm-rl-observability/).
+- [The framework comparison](/ashish-ai-blog/blog/llm-rl-frameworks-compared/) — the same patterns measured across seven frameworks.

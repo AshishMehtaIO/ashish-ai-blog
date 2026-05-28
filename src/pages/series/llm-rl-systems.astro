@@ -72,6 +72,20 @@ const posts = [
     pubDate: '2026-05-28',
     summary: 'Zooming out: the same design dimensions across seven frameworks — VERL, TRL, OpenRLHF, NeMo RL, AReaL, slime, Miles — and how to choose. A snapshot, not a benchmark.',
   },
+  {
+    slug: 'llm-rl-design-patterns',
+    n: '10',
+    title: 'Design patterns in LLM RL systems',
+    pubDate: '2026-05-28',
+    summary: 'The synthesis. Six patterns the field converged on — single-controller orchestration, algorithm-as-advantage-estimator, the engine split + resharding adapter, response-masked multi-turn, bounded-staleness async, reward-as-pipeline. The spine of the series.',
+  },
+  {
+    slug: 'llm-rl-open-problems',
+    n: '11',
+    title: "What LLM RL frameworks haven't solved yet",
+    pubDate: '2026-05-28',
+    summary: 'The negative space. Eight unsolved problems as a research agenda: first-class process rewards, off-policy beyond one step, multi-agent, multi-modal, reward-hacking detection, deterministic debugging, train-vs-serve divergence.',
+  },
 ];
 
 const fmt = (d: string) =>
@@ -85,6 +99,11 @@ const fmt = (d: string) =>
       <h1>{series.title}</h1>
       <p class="series-tagline">{series.tagline}</p>
       <p class="series-author">by <a href={url('about')}>{series.author}</a></p>
+      <p class="series-starthere">
+        New here? Start with <a href={url('blog/llm-rl-systems-overview/')}>the systems overview</a>,
+        or jump to <a href={url('blog/llm-rl-design-patterns/')}>the design-patterns synthesis</a>
+        for the map.
+      </p>
     </header>
 
     <section class="series-audience">
@@ -186,6 +205,18 @@ const fmt = (d: string) =>
     text-decoration: none;
   }
   .series-author a:hover { text-decoration: underline; }
+
+  .series-starthere {
+    margin: 1rem 0 0;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    padding: 0.6rem 0.85rem;
+    background: var(--code-bg);
+    border-radius: 4px;
+    display: inline-block;
+  }
+  .series-starthere a { color: var(--accent); }
 
   section {
     margin: 3rem 0;
