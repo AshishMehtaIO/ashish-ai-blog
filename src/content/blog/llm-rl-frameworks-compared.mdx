@@ -1,0 +1,165 @@
+---
+title: "The LLM RL framework landscape: VERL, TRL, OpenRLHF, NeMo RL, AReaL, slime, Miles"
+description: "A dimension-by-dimension comparison of seven open-source LLM RL frameworks — orchestration, algorithms, backends, multi-turn, async, reward interface, observability — and how to choose. A snapshot, not a benchmark."
+pubDate: 2026-05-28
+author: "Ashish Mehta"
+tags: ["llm-rl", "systems", "frameworks", "comparison"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import ComparisonTable from '../../components/blog/ComparisonTable.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
+
+The rest of this series uses [VERL](https://github.com/verl-project/verl) as a worked example to study how an LLM RL system is built. This post zooms out: the same design dimensions, across seven open-source frameworks. The goal is not "which is best" — that depends on your model size, cluster, and task — but to map the *design space*, so the choices each framework makes become legible against each other.<Sidenote id="sn-snapshot">This is a **snapshot as of May 2026**, drawn from each project's README and docs. Frameworks move fast: cells marked *partial* or *—* mean "not first-class / not documented," not "impossible." Verify against current docs before betting a project on any single cell. Corrections welcome.</Sidenote>
+
+A word on what this is not. It is not a benchmark — there are no throughput numbers here, because fair cross-framework benchmarking is a research project in itself (different default configs, different optimal hardware, different reference models). It is a *capability and design* comparison: what each framework is shaped to do.
+
+## The seven frameworks, in one line each
+
+- **[VERL](https://github.com/verl-project/verl)** (ByteDance) — the [HybridFlow](https://arxiv.org/abs/2409.19256) reference implementation; hybrid single-controller + SPMD, pluggable backends. The worked example throughout this series.
+- **[TRL](https://github.com/huggingface/trl)** (Hugging Face) — the most widely-used library; tightly integrated with the HF stack (Transformers, Accelerate, PEFT). Broadest algorithm menu, including offline preference methods.
+- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)** — Ray + vLLM + DeepSpeed; an early mover on disaggregated, async RLHF at scale.
+- **[NeMo RL](https://github.com/NVIDIA-NeMo/RL)** (NVIDIA) — the Ray-based successor to NeMo-Aligner;<Sidenote id="sn-aligner">NeMo-Aligner, the previous NVIDIA entry, was deprecated on 2025-05-15 in favor of NeMo RL, which adopts Ray as its scheduling backbone. If you find NeMo-Aligner references elsewhere, they describe the older, Megatron-SPMD design.</Sidenote> Megatron-Core + DTensor (FSDP2), reward-models-as-environments.
+- **[AReaL](https://github.com/inclusionAI/AReaL)** (Ant / InclusionAI) — async-first by design; bounded-staleness off-policy RL with SGLang rollout.
+- **[slime](https://github.com/THUDM/slime)** (THUDM) — SGLang-centric RL scaling framework; clean three-module (train / rollout / data-buffer) loop on Ray.
+- **[Miles](https://github.com/radixark/miles)** (RadixArk / InfiXAI / Ant / SGLang-RL) — a slime fork used to train GLM-4.6; its signature is *Rollout Routing Replay* (R3), which records SGLang's MoE expert-routing decisions and replays them in training to keep large-MoE RL stable.<Sidenote id="sn-miles">Miles is young (announced November 2025). Several dimensions below are inherited-from-slime by reasonable inference but not separately documented; those are flagged *unclear* rather than asserted.</Sidenote>
+
+## Orchestration
+
+The first fork in the design space: who decides what runs next? A single driver (flexible, a coordination point) or symmetric SPMD workers (efficient, rigid)? Most modern frameworks land on a Ray-based hybrid.
+
+<ComparisonTable
+  caption="Orchestration model. 'Hybrid' = a single-controller driver over multi-controller (SPMD) worker groups."
+  note="May 2026."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Controller", "hybrid", "single process", "Ray workers", "single + Ray", "single + SPMD", "Ray (3-module)", "Ray (slime fork)"],
+    ["Uses Ray", "yes", "no", "yes", "yes", "optional", "yes", "yes"],
+  ]}
+/>
+
+TRL is the outlier and deliberately so: it runs in a single Accelerate-launched process, which makes it the easiest to start with and the hardest to scale to disaggregated multi-pool setups. Everyone targeting large-scale or async training converges on Ray.
+
+## Algorithms
+
+This is where the [algorithm-interface post](/ashish-ai-blog/blog/llm-rl-algorithm-interface/) argument plays out across frameworks: those built around the advantage-estimator interface support the GRPO family cheaply; the ones rooted in classic RLHF lead with PPO.
+
+<ComparisonTable
+  caption="Algorithm support. 'yes' = documented first-class; 'partial' = present but not a named first-class trainer; '—' = not documented (not necessarily impossible)."
+  note="May 2026. TRL's PPO trainer is flagged experimental."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["PPO", "yes", "partial", "yes", "—", "yes", "yes", "unclear"],
+    ["GRPO", "yes", "yes", "yes", "yes", "yes", "yes", "yes"],
+    ["RLOO", "yes", "yes", "yes", "—", "yes", "—", "unclear"],
+    ["REINFORCE++", "yes", "—", "yes", "—", "yes", "yes", "unclear"],
+    ["DAPO", "yes", "—", "partial", "yes", "yes", "—", "unclear"],
+    ["DPO / KTO", "DPO", "yes", "DPO", "DPO", "DPO", "unclear", "unclear"],
+  ]}
+/>
+
+Two things stand out. TRL has the widest *offline* menu (DPO, KTO, ORPO, CPO, BCO) because it grew from the preference-tuning world; if you need those, it is the natural home. And NeMo RL conspicuously leads with GRPO/GSPO/DAPO rather than PPO — a sign of how fully the GRPO family has displaced PPO for verifiable-reward tasks since 2024.
+
+## Backends: rollout and training engines
+
+The [engines post](/ashish-ai-blog/blog/llm-rl-engines/) argues these are necessarily separate codebases bridged by an adapter. Which two engines a framework bets on is one of its most consequential choices.
+
+<ComparisonTable
+  caption="Rollout (inference) and training engines. SGLang's rise as a rollout backend is the clearest recent trend."
+  note="May 2026."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Rollout engine", "vLLM, SGLang", "vLLM, HF", "vLLM", "vLLM, SGLang", "SGLang, vLLM", "SGLang", "SGLang"],
+    ["Training engine", "FSDP, Megatron", "DeepSpeed, FSDP", "DeepSpeed ZeRO", "Megatron, FSDP2", "FSDP2, Megatron", "Megatron", "Megatron"],
+  ]}
+/>
+
+The newer the framework, the more likely it is SGLang-first (AReaL, slime, Miles) — a notable shift from the vLLM-default era that VERL and OpenRLHF were born in. On the training side, the split is between the DeepSpeed lineage (TRL, OpenRLHF) and the Megatron+FSDP lineage (VERL, NeMo RL, AReaL, slime, Miles).
+
+## Multi-turn, tools, and agents
+
+<ComparisonTable
+  caption="Multi-turn / tool / agent support."
+  note="May 2026. NeMo-Aligner (deprecated) had none documented; NeMo RL added it."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Multi-turn", "first-class", "first-class", "first-class", "first-class", "first-class", "first-class", "first-class"],
+    ["Tool / agent", "yes", "yes", "agent server", "yes (+games)", "yes", "yes", "multi-agent"],
+  ]}
+/>
+
+Multi-turn went from exotic to table-stakes fast: every actively-developed framework here now treats it as first-class. The differentiation has moved up a level — to *how* (NeMo RL ships game environments; Miles co-trains multiple agents; VERL's `@function_tool` is the lightest tool-definition surface). See the [multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/) for the mechanics.
+
+## Async rollout
+
+The [scaling post](/ashish-ai-blog/blog/llm-rl-scaling/) frames async as *the* lever beyond ~13B. Frameworks differ sharply in how far they take it.
+
+<ComparisonTable
+  caption="Async rollout support. 'Fully async' = continuous generation decoupled from training, with explicit staleness control."
+  note="May 2026."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Async rollout", "one-step + full", "—", "fully async", "fully async", "fully async", "fully async", "partial"],
+    ["Staleness control", "bounded / variable", "n/a", "partial rollout", "replay buffers", "max_head_offpolicyness", "config", "over-sampling"],
+  ]}
+/>
+
+AReaL is the purest expression of the async-first philosophy — its `max_head_offpolicyness` knob makes bounded staleness a first-class config dimension. TRL, single-process by design, is the one framework here with no async-overlap story.
+
+## Reward interface
+
+The [reward post](/ashish-ai-blog/blog/llm-rl-reward-design/) treats the reward as a specification surface. Frameworks expose it differently — and the shape of that interface tells you what they consider the common case.
+
+<ComparisonTable
+  caption="How a user defines a reward."
+  note="May 2026."
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Rule / custom fn", "Python callable", "Python callables", "Python fn file", "environment class", "Python reward_fn", "custom-fn hook", "slime-inherited"],
+    ["Reward model", "RM server", "RewardTrainer", "HTTP RM server", "RM-as-env", "RM wrapper", "custom RM path", "unclear"],
+  ]}
+/>
+
+NeMo RL's choice is the most distinctive: a reward is an *environment* (a Ray actor implementing an interface), not a callback — which folds RMs, verifiers, and games into one abstraction. VERL, AReaL, and slime favor the lighter "give us a Python function" surface.
+
+## Observability
+
+<ComparisonTable
+  caption="Built-in experiment logging."
+  note="May 2026. Absence here means 'not documented,' not 'unsupported.'"
+  headers={["", "VERL", "TRL", "OpenRLHF", "NeMo RL", "AReaL", "slime", "Miles"]}
+  rows={[
+    ["Loggers", "W&B, TB, MLflow", "W&B, TB, MLflow, Comet", "W&B, TB", "W&B", "W&B, SwanLab, TB", "W&B", "unclear"],
+  ]}
+/>
+
+TRL inherits the Transformers `Trainer`'s logging breadth; the China-origin frameworks (AReaL, slime) add SwanLab. The [observability post](/ashish-ai-blog/blog/llm-rl-observability/) argues that what you log matters more than which logger — the canonical metric set is the same everywhere.
+
+## How to choose
+
+A decision guide, by priority:
+
+- **Easiest on-ramp, smallest scale, offline preference methods (DPO/KTO):** **TRL**. Single process, HF-native, the widest menu — until you outgrow one node.
+- **Verifiable-reward RL (math, code) at moderate scale:** **VERL** or **AReaL**. Both GRPO-family-first with strong multi-turn and async stories. VERL if you want the most-documented, broadest-adopted; AReaL if async throughput is the priority.
+- **NVIDIA / Megatron-heavy shops:** **NeMo RL**. Deep Megatron-Core integration, environments-as-rewards, game support.
+- **Large MoE models:** **Miles** (Rollout Routing Replay targets exactly the MoE-RL instability) or **slime** if you want the upstream.
+- **Disaggregated, async-at-scale RLHF with reward-model servers:** **OpenRLHF**. An early, battle-tested take on that exact shape.
+- **SGLang shop:** **slime**, **AReaL**, or **Miles** — all SGLang-native.
+
+The meta-point: these frameworks are converging. Ray orchestration, the GRPO family, SGLang rollout, first-class multi-turn, bounded-staleness async — these were differentiators in 2024 and are becoming defaults in 2026. What remains genuinely differentiated is the long tail: NeMo RL's environments-as-rewards, Miles's routing replay, AReaL's staleness knob, TRL's offline menu, VERL's resharding maturity.
+
+<DesignPrinciple>
+A maturing field converges on a shared architecture, and the interesting differences migrate to the edges. When every framework shares the same spine — Ray orchestration, an advantage-estimator interface, a rollout/training engine split, response-masked multi-turn, bounded-staleness async — the right question stops being "which architecture" and becomes "which edge case is load-bearing for my workload."
+</DesignPrinciple>
+
+## References
+
+- VERL / HybridFlow — Sheng et al. (2024), [arXiv:2409.19256](https://arxiv.org/abs/2409.19256); [repo](https://github.com/verl-project/verl).
+- TRL — [github.com/huggingface/trl](https://github.com/huggingface/trl), [docs](https://huggingface.co/docs/trl).
+- OpenRLHF — Hu et al. (2024), [arXiv:2405.11143](https://arxiv.org/abs/2405.11143); [repo](https://github.com/OpenRLHF/OpenRLHF).
+- NeMo RL — [github.com/NVIDIA-NeMo/RL](https://github.com/NVIDIA-NeMo/RL) (successor to NeMo-Aligner).
+- AReaL — Mei et al. (2025), [arXiv:2505.24298](https://arxiv.org/abs/2505.24298); [repo](https://github.com/inclusionAI/AReaL).
+- slime — [github.com/THUDM/slime](https://github.com/THUDM/slime).
+- Miles — [github.com/radixark/miles](https://github.com/radixark/miles); [LMSYS blog (2025-11-19)](https://lmsys.org/blog/).
+
+*All capability claims reflect project documentation as of May 2026 and may be out of date. This is a design comparison, not a benchmark; corrections are welcome.*

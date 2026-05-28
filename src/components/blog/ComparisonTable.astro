@@ -1,0 +1,124 @@
+---
+// Generic framework-comparison table. Data-driven; many columns scroll
+// horizontally on narrow screens. Cells are color-coded by a light heuristic
+// on common tokens (yes / no / partial / unclear / —).
+//
+// Usage in MDX:
+//   <ComparisonTable
+//     caption="Orchestration model across frameworks."
+//     headers={["", "VERL", "TRL", "OpenRLHF"]}
+//     rows={[["Uses Ray", "yes", "no", "yes"]]}
+//     note="As of May 2026." />
+interface Props {
+  caption?: string;
+  note?: string;
+  headers: string[];
+  rows: string[][];
+}
+const { caption, note, headers, rows } = Astro.props;
+
+function tone(v: string): string {
+  const s = v.trim().toLowerCase();
+  if (s === 'yes' || s === 'first-class') return 'yes';
+  if (s === 'no' || s === '—' || s === '-' || s === 'none') return 'no';
+  if (s === 'partial' || s.startsWith('partial') || s === 'optional' || s.includes('exp')) return 'partial';
+  if (s === 'unclear' || s === '?') return 'unclear';
+  return '';
+}
+---
+
+<figure class="cmp-figure">
+  <div class="cmp-scroll">
+    <table class="cmp-table">
+      <thead>
+        <tr>
+          {headers.map((h, i) => (
+            <th class={i === 0 ? 'cmp-rowhead' : 'cmp-colhead'}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr>
+            {row.map((cell, i) =>
+              i === 0 ? (
+                <th scope="row" class="cmp-rowhead">{cell}</th>
+              ) : (
+                <td class={`cmp-cell cmp-tone-${tone(cell)}`}>{cell}</td>
+              )
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+  {caption && <figcaption>{caption}{note && <span class="cmp-note"> {note}</span>}</figcaption>}
+</figure>
+
+<style>
+  .cmp-figure {
+    margin: 2rem 0;
+    max-width: 940px;
+  }
+  .cmp-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .cmp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    margin: 0;
+    min-width: 640px;
+  }
+  .cmp-colhead {
+    background: var(--code-bg);
+    color: var(--text);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.6rem 0.7rem;
+    border-bottom: 1px solid var(--border-strong);
+    white-space: nowrap;
+  }
+  .cmp-rowhead {
+    background: var(--code-bg);
+    color: var(--text);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    white-space: nowrap;
+  }
+  thead .cmp-rowhead { z-index: 2; }
+  .cmp-cell {
+    padding: 0.5rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: top;
+  }
+  .cmp-tone-yes { color: #2f7d32; font-weight: 500; }
+  .cmp-tone-no { color: var(--text-faint); }
+  .cmp-tone-partial { color: #b9770e; }
+  .cmp-tone-unclear { color: var(--text-faint); font-style: italic; }
+
+  @media (prefers-color-scheme: dark) {
+    .cmp-tone-yes { color: #6cc070; }
+    .cmp-tone-partial { color: #d8a13e; }
+  }
+
+  figcaption {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-top: 0.6rem;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .cmp-note { color: var(--text-faint); }
+</style>
