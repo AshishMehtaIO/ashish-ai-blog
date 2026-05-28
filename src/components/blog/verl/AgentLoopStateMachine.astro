@@ -1,0 +1,178 @@
+---
+// Viz — AgentLoop state machine. 6 states arranged in a cycle; play button
+// animates one full turn cycle.
+---
+
+<figure class="asm-figure" aria-label="AgentLoop state machine">
+  <svg viewBox="0 0 720 320" class="asm-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <marker id="asm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+
+    <!-- 6 states arranged in hexagonal ring -->
+    <g class="asm-state" data-state="prompt" transform="translate(80 130)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">PROMPT</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">assemble messages</text>
+    </g>
+    <g class="asm-state" data-state="generate" transform="translate(230 60)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">GENERATE</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">rollout engine</text>
+    </g>
+    <g class="asm-state" data-state="parse" transform="translate(430 60)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">PARSE</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">find tool calls</text>
+    </g>
+    <g class="asm-state" data-state="execute" transform="translate(580 130)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">EXECUTE</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">run the tool</text>
+    </g>
+    <g class="asm-state" data-state="append" transform="translate(430 220)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">APPEND</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">add to history</text>
+    </g>
+    <g class="asm-state" data-state="check" transform="translate(230 220)">
+      <rect width="130" height="60" rx="8" class="asm-rect" />
+      <text x="65" y="25" class="asm-label" text-anchor="middle">CHECK</text>
+      <text x="65" y="42" class="asm-sub" text-anchor="middle">done? turn limit?</text>
+    </g>
+
+    <!-- Edges connecting them in a cycle -->
+    <path class="asm-edge" data-edge="prompt-gen"     d="M 210 145 Q 230 100 230 90" marker-end="url(#asm-arrow)" fill="none" />
+    <path class="asm-edge" data-edge="gen-parse"      d="M 360 90 L 430 90" marker-end="url(#asm-arrow)" fill="none" />
+    <path class="asm-edge" data-edge="parse-exec"     d="M 560 90 Q 600 100 600 130" marker-end="url(#asm-arrow)" fill="none" />
+    <path class="asm-edge" data-edge="exec-append"    d="M 600 190 Q 600 230 560 245" marker-end="url(#asm-arrow)" fill="none" />
+    <path class="asm-edge" data-edge="append-check"   d="M 430 250 L 360 250" marker-end="url(#asm-arrow)" fill="none" />
+    <path class="asm-edge" data-edge="check-prompt"   d="M 230 245 Q 200 220 200 190" marker-end="url(#asm-arrow)" fill="none" />
+
+    <!-- Skip path: parse → check (if no tool call, agent is done) -->
+    <path class="asm-edge asm-edge-skip" data-edge="parse-check" d="M 495 130 Q 400 175 360 240" marker-end="url(#asm-arrow)" fill="none" stroke-dasharray="4 3" />
+    <text x="395" y="200" class="asm-edge-label" text-anchor="middle">no tool call</text>
+
+    <!-- Center label -->
+    <text x="380" y="160" class="asm-center-label" text-anchor="middle">AgentLoop</text>
+    <text x="380" y="178" class="asm-center-sub" text-anchor="middle">one turn cycle</text>
+  </svg>
+
+  <div class="asm-controls">
+    <button type="button" class="asm-btn" data-control="play">play one cycle</button>
+    <button type="button" class="asm-btn" data-control="step">step</button>
+    <button type="button" class="asm-btn" data-control="reset">reset</button>
+  </div>
+
+  <figcaption>
+    The AgentLoop steps through six states per turn. After PARSE, if no tool call is found, the
+    loop skips EXECUTE/APPEND and goes straight to CHECK (the agent is done). Otherwise, the
+    tool runs, its output is appended to the conversation, and CHECK either ends the loop or
+    sends control back to PROMPT for the next turn.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const SEQUENCE = ['prompt', 'generate', 'parse', 'execute', 'append', 'check'];
+
+    document.querySelectorAll<HTMLElement>('.asm-figure').forEach((fig) => {
+      const states = Array.from(fig.querySelectorAll<SVGGElement>('.asm-state'));
+      const edges = Array.from(fig.querySelectorAll<SVGPathElement>('.asm-edge'));
+      const playBtn = fig.querySelector<HTMLButtonElement>('[data-control="play"]')!;
+      const stepBtn = fig.querySelector<HTMLButtonElement>('[data-control="step"]')!;
+      const resetBtn = fig.querySelector<HTMLButtonElement>('[data-control="reset"]')!;
+
+      let idx = -1;
+      let timer: number | null = null;
+
+      function highlight(stateId: string | null) {
+        states.forEach((s) => s.classList.toggle('is-active', s.getAttribute('data-state') === stateId));
+      }
+      function reset() {
+        idx = -1;
+        if (timer) { clearInterval(timer); timer = null; }
+        highlight(null);
+        playBtn.textContent = 'play one cycle';
+      }
+      function step() {
+        if (timer) { clearInterval(timer); timer = null; playBtn.textContent = 'play one cycle'; }
+        idx = (idx + 1) % SEQUENCE.length;
+        highlight(SEQUENCE[idx]);
+      }
+      function play() {
+        if (timer) { reset(); return; }
+        idx = -1;
+        playBtn.textContent = 'stop';
+        timer = window.setInterval(() => {
+          idx++;
+          if (idx >= SEQUENCE.length) { reset(); return; }
+          highlight(SEQUENCE[idx]);
+        }, 700);
+      }
+
+      playBtn.addEventListener('click', play);
+      stepBtn.addEventListener('click', step);
+      resetBtn.addEventListener('click', reset);
+
+      const io = new IntersectionObserver((entries) => entries.forEach((e) => { if (!e.isIntersecting && timer) reset(); }), { threshold: 0.1 });
+      io.observe(fig);
+    });
+  })();
+</script>
+
+<style>
+  .asm-figure { margin: 2.5rem 0; max-width: 880px; }
+  .asm-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .asm-rect {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+    transition: all 250ms ease;
+  }
+  .asm-state.is-active .asm-rect {
+    fill: var(--accent);
+    stroke: var(--accent);
+  }
+  .asm-label { fill: var(--text); font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+  .asm-state.is-active .asm-label { fill: var(--bg); }
+  .asm-sub { fill: var(--text-muted); font-size: 10.5px; }
+  .asm-state.is-active .asm-sub { fill: var(--bg); opacity: 0.8; }
+  .asm-edge { stroke: var(--text-muted); stroke-width: 1.4; opacity: 0.7; }
+  .asm-edge-skip { stroke: var(--text-faint); }
+  .asm-edge-label { fill: var(--text-faint); font-size: 10px; font-family: var(--font-mono); font-style: italic; }
+  #asm-arrow path { fill: var(--text-muted); }
+  .asm-center-label {
+    fill: var(--text);
+    font-size: 14px;
+    font-family: var(--font-serif);
+    font-weight: 600;
+    font-style: italic;
+  }
+  .asm-center-sub { fill: var(--text-faint); font-size: 10.5px; }
+
+  .asm-controls {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+  }
+  .asm-btn {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .asm-btn:hover { background: var(--code-bg); border-color: var(--accent); }
+</style>

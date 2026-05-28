@@ -1,0 +1,198 @@
+---
+// Viz — BaseTool lifecycle. Four methods in a horizontal flow: create →
+// execute (× N) → calc_reward → release. Step through to see each fire.
+---
+
+<figure class="tl-figure" aria-label="BaseTool lifecycle">
+  <svg viewBox="0 0 720 280" class="tl-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <marker id="tl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+
+    <!-- Timeline ribbon -->
+    <line x1="60" y1="240" x2="700" y2="240" class="tl-axis" />
+    <text x="60" y="262" class="tl-tick-label" text-anchor="start">agent loop starts</text>
+    <text x="700" y="262" class="tl-tick-label" text-anchor="end">agent loop ends</text>
+
+    <!-- create -->
+    <g class="tl-method" data-method="create" transform="translate(70 60)">
+      <rect width="120" height="70" rx="8" class="tl-rect" />
+      <text x="60" y="22" class="tl-method-name" text-anchor="middle">create()</text>
+      <text x="60" y="40" class="tl-method-sub" text-anchor="middle">once per</text>
+      <text x="60" y="54" class="tl-method-sub" text-anchor="middle">instance</text>
+      <line x1="60" y1="80" x2="60" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="60" cy="170" r="4" class="tl-pin" />
+    </g>
+
+    <!-- execute × N (3 instances shown) -->
+    <g class="tl-method" data-method="execute" transform="translate(230 60)">
+      <rect width="140" height="70" rx="8" class="tl-rect tl-rect-execute" />
+      <text x="70" y="22" class="tl-method-name" text-anchor="middle">execute()</text>
+      <text x="70" y="40" class="tl-method-sub" text-anchor="middle">per tool call</text>
+      <text x="70" y="54" class="tl-method-sub" text-anchor="middle">(× N invocations)</text>
+      <line x1="35" y1="80" x2="35" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="35" cy="170" r="4" class="tl-pin" />
+      <line x1="75" y1="80" x2="75" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="75" cy="170" r="4" class="tl-pin" />
+      <line x1="115" y1="80" x2="115" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="115" cy="170" r="4" class="tl-pin" />
+    </g>
+
+    <!-- calc_reward -->
+    <g class="tl-method" data-method="calc_reward" transform="translate(410 60)">
+      <rect width="140" height="70" rx="8" class="tl-rect tl-rect-reward" />
+      <text x="70" y="22" class="tl-method-name" text-anchor="middle">calc_reward()</text>
+      <text x="70" y="40" class="tl-method-sub" text-anchor="middle">optional</text>
+      <text x="70" y="54" class="tl-method-sub" text-anchor="middle">after rollout</text>
+      <line x1="70" y1="80" x2="70" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="70" cy="170" r="4" class="tl-pin" />
+    </g>
+
+    <!-- release -->
+    <g class="tl-method" data-method="release" transform="translate(580 60)">
+      <rect width="120" height="70" rx="8" class="tl-rect" />
+      <text x="60" y="22" class="tl-method-name" text-anchor="middle">release()</text>
+      <text x="60" y="40" class="tl-method-sub" text-anchor="middle">teardown</text>
+      <text x="60" y="54" class="tl-method-sub" text-anchor="middle">at end</text>
+      <line x1="60" y1="80" x2="60" y2="170" class="tl-stem" stroke-dasharray="2 3" />
+      <circle cx="60" cy="170" r="4" class="tl-pin" />
+    </g>
+
+    <!-- Connecting arrow on timeline -->
+    <line x1="60" y1="200" x2="700" y2="200" class="tl-timeline-arrow" />
+    <text x="380" y="195" class="tl-timeline-label" text-anchor="middle">time →</text>
+  </svg>
+
+  <div class="tl-detail" data-region="detail">
+    <h5 data-readout="title">Click any method</h5>
+    <pre data-readout="code"></pre>
+    <p data-readout="desc"></p>
+  </div>
+
+  <figcaption>
+    The four-method <code>BaseTool</code> lifecycle. <code>create</code> runs once when the
+    agent loop spins up its tools. <code>execute</code> runs every time the agent invokes the
+    tool. <code>calc_reward</code> (optional) runs once at the end and contributes to the
+    response-level reward. <code>release</code> cleans up. Click each method for the signature
+    and a one-line explanation.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const DETAILS: Record<string, { title: string; code: string; desc: string }> = {
+      create: {
+        title: 'create(instance_id)',
+        code: 'async def create(self, instance_id: str) -> None:\n    """Called once when an agent loop starts using this tool."""\n    self._sandboxes[instance_id] = await spin_up_sandbox()',
+        desc: 'Per-instance setup. instance_id distinguishes between the many agent loops running concurrently — each one gets its own resource. Spin up Docker containers, allocate temp dirs, initialize per-conversation state here.',
+      },
+      execute: {
+        title: 'execute(instance_id, parameters)',
+        code: 'async def execute(self, instance_id, parameters: dict) -> ToolResponse:\n    """Called every time the agent invokes the tool."""\n    result = await self._sandboxes[instance_id].run(parameters["code"])\n    return ToolResponse(text=result.stdout)',
+        desc: 'The core action. parameters is the dict the model emitted in its tool call. Returns a ToolResponse (text/image/video) that gets re-injected into the next turn\'s prompt. Can be called many times per agent loop.',
+      },
+      calc_reward: {
+        title: 'calc_reward(instance_id) → float',
+        code: 'async def calc_reward(self, instance_id: str) -> float:\n    """Optional. Contributes to the response-level reward."""\n    successes = len(self._results[instance_id])\n    errors = len(self._errors[instance_id])\n    return 0.05 * successes - 0.02 * errors',
+        desc: 'Optional tool-level reward. Lets you nudge the policy based on how it used the tool, not just the final answer. Watch for the policy gaming this — keep the magnitude small relative to task reward.',
+      },
+      release: {
+        title: 'release(instance_id)',
+        code: 'async def release(self, instance_id: str) -> None:\n    """Called when the agent loop ends. Tear down per-instance state."""\n    await self._sandboxes[instance_id].close()\n    del self._sandboxes[instance_id]',
+        desc: 'Cleanup. Critical for stateful tools — without it, every agent loop leaks resources. The framework guarantees release is called even if the loop errors.',
+      },
+    };
+
+    document.querySelectorAll<HTMLElement>('.tl-figure').forEach((fig) => {
+      const methods = Array.from(fig.querySelectorAll<SVGGElement>('.tl-method'));
+      const titleEl = fig.querySelector<HTMLElement>('[data-readout="title"]')!;
+      const codeEl = fig.querySelector<HTMLElement>('[data-readout="code"]')!;
+      const descEl = fig.querySelector<HTMLElement>('[data-readout="desc"]')!;
+
+      function highlight(id: string) {
+        methods.forEach((m) => m.classList.toggle('is-active', m.getAttribute('data-method') === id));
+        const d = DETAILS[id];
+        if (d) {
+          titleEl.textContent = d.title;
+          codeEl.textContent = d.code;
+          descEl.textContent = d.desc;
+        }
+      }
+
+      methods.forEach((m) => {
+        m.addEventListener('click', () => highlight(m.getAttribute('data-method') || ''));
+        m.addEventListener('mouseenter', () => highlight(m.getAttribute('data-method') || ''));
+      });
+
+      highlight('create');
+    });
+  })();
+</script>
+
+<style>
+  .tl-figure { margin: 2.5rem 0; max-width: 880px; }
+  .tl-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .tl-method { cursor: pointer; }
+  .tl-rect {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+    transition: all 200ms ease;
+  }
+  .tl-rect-execute { fill: #dde5f3; stroke: #4a78c2; }
+  .tl-rect-reward  { fill: #d8ecd1; stroke: #4a8a3d; }
+  .tl-method:hover .tl-rect, .tl-method.is-active .tl-rect {
+    stroke-width: 2.5;
+    stroke: var(--accent);
+  }
+  .tl-method-name { fill: var(--text); font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+  .tl-method-sub  { fill: var(--text-muted); font-size: 10.5px; }
+  .tl-stem  { stroke: var(--text-faint); stroke-width: 1; opacity: 0.7; }
+  .tl-pin   { fill: var(--text-faint); }
+  .tl-method:hover .tl-stem, .tl-method.is-active .tl-stem { stroke: var(--accent); }
+  .tl-method:hover .tl-pin, .tl-method.is-active .tl-pin { fill: var(--accent); }
+  .tl-axis { stroke: var(--border-strong); stroke-width: 1; }
+  .tl-tick-label { fill: var(--text-faint); font-size: 10px; font-family: var(--font-sans); }
+  .tl-timeline-arrow { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+  .tl-timeline-label { fill: var(--text-faint); font-size: 10px; font-family: var(--font-sans); }
+
+  .tl-detail {
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .tl-detail h5 {
+    margin: 0 0 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--accent);
+  }
+  .tl-detail pre {
+    margin: 0 0 0.5rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .tl-detail p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+</style>

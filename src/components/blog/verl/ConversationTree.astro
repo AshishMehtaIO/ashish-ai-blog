@@ -1,0 +1,221 @@
+---
+// Viz — Conversation tree. The prompt is the root; each generation node has
+// children for possible tool responses; rollouts walk one path. Show three
+// rollouts in different colors taking different paths.
+---
+
+<figure class="ct-figure" aria-label="Multi-turn conversation tree">
+  <div class="ct-controls">
+    <button type="button" class="ct-btn" data-control="show-1">show 1 rollout</button>
+    <button type="button" class="ct-btn" data-control="show-3">show 3 rollouts</button>
+    <button type="button" class="ct-btn" data-control="show-all">show all paths</button>
+  </div>
+
+  <svg viewBox="0 0 720 360" class="ct-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <!-- The tree is a binary tree, 4 levels deep -->
+    <!-- Root: prompt -->
+    <g class="ct-node ct-node-prompt" transform="translate(360 30)">
+      <circle r="14" class="ct-circle" />
+      <text x="0" y="-22" class="ct-node-label" text-anchor="middle">prompt</text>
+    </g>
+
+    <!-- Level 1: 2 children (agent's first turn options) -->
+    <line x1="360" y1="30" x2="200" y2="110" class="ct-edge" data-edge="0-0" />
+    <line x1="360" y1="30" x2="520" y2="110" class="ct-edge" data-edge="0-1" />
+    <g class="ct-node ct-node-agent" transform="translate(200 110)" data-pos="1-0">
+      <circle r="12" class="ct-circle" />
+      <text x="0" y="-18" class="ct-node-label" text-anchor="middle">try strategy A</text>
+    </g>
+    <g class="ct-node ct-node-agent" transform="translate(520 110)" data-pos="1-1">
+      <circle r="12" class="ct-circle" />
+      <text x="0" y="-18" class="ct-node-label" text-anchor="middle">try strategy B</text>
+    </g>
+
+    <!-- Level 2: 4 children -->
+    <line x1="200" y1="110" x2="120" y2="190" class="ct-edge" data-edge="1-0a" />
+    <line x1="200" y1="110" x2="280" y2="190" class="ct-edge" data-edge="1-0b" />
+    <line x1="520" y1="110" x2="440" y2="190" class="ct-edge" data-edge="1-1a" />
+    <line x1="520" y1="110" x2="600" y2="190" class="ct-edge" data-edge="1-1b" />
+    <g class="ct-node ct-node-tool" transform="translate(120 190)" data-pos="2-0">
+      <circle r="10" class="ct-circle" />
+      <text x="0" y="-16" class="ct-node-label" text-anchor="middle">tool resp 1</text>
+    </g>
+    <g class="ct-node ct-node-tool" transform="translate(280 190)" data-pos="2-1">
+      <circle r="10" class="ct-circle" />
+      <text x="0" y="-16" class="ct-node-label" text-anchor="middle">tool resp 2</text>
+    </g>
+    <g class="ct-node ct-node-tool" transform="translate(440 190)" data-pos="2-2">
+      <circle r="10" class="ct-circle" />
+      <text x="0" y="-16" class="ct-node-label" text-anchor="middle">tool resp 3</text>
+    </g>
+    <g class="ct-node ct-node-tool" transform="translate(600 190)" data-pos="2-3">
+      <circle r="10" class="ct-circle" />
+      <text x="0" y="-16" class="ct-node-label" text-anchor="middle">tool resp 4</text>
+    </g>
+
+    <!-- Level 3: 8 children (final answers) -->
+    <line x1="120" y1="190" x2="80"  y2="280" class="ct-edge" data-edge="2-0a" />
+    <line x1="120" y1="190" x2="160" y2="280" class="ct-edge" data-edge="2-0b" />
+    <line x1="280" y1="190" x2="240" y2="280" class="ct-edge" data-edge="2-1a" />
+    <line x1="280" y1="190" x2="320" y2="280" class="ct-edge" data-edge="2-1b" />
+    <line x1="440" y1="190" x2="400" y2="280" class="ct-edge" data-edge="2-2a" />
+    <line x1="440" y1="190" x2="480" y2="280" class="ct-edge" data-edge="2-2b" />
+    <line x1="600" y1="190" x2="560" y2="280" class="ct-edge" data-edge="2-3a" />
+    <line x1="600" y1="190" x2="640" y2="280" class="ct-edge" data-edge="2-3b" />
+
+    <g class="ct-node ct-node-final" transform="translate(80 280)"  data-pos="3-0"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=0</text></g>
+    <g class="ct-node ct-node-final" transform="translate(160 280)" data-pos="3-1"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=1</text></g>
+    <g class="ct-node ct-node-final" transform="translate(240 280)" data-pos="3-2"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=0</text></g>
+    <g class="ct-node ct-node-final" transform="translate(320 280)" data-pos="3-3"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=0</text></g>
+    <g class="ct-node ct-node-final" transform="translate(400 280)" data-pos="3-4"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=1</text></g>
+    <g class="ct-node ct-node-final" transform="translate(480 280)" data-pos="3-5"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=1</text></g>
+    <g class="ct-node ct-node-final" transform="translate(560 280)" data-pos="3-6"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=0</text></g>
+    <g class="ct-node ct-node-final" transform="translate(640 280)" data-pos="3-7"><circle r="10" class="ct-circle" /><text x="0" y="30" class="ct-leaf-label" text-anchor="middle">r=0</text></g>
+  </svg>
+
+  <div class="ct-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    Each multi-turn rollout walks one path through this tree. Levels alternate between agent
+    choices and tool responses. Leaves are final answers, scored by the reward function.
+    GRPO\'s group sampling explores multiple paths per prompt — that\'s the variance reduction
+    in action.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    // Three sample rollouts taking different paths
+    const ROLLOUTS = [
+      { color: 0, nodes: ['0', '1-0', '2-0', '3-1'], edges: ['0-0', '1-0a', '2-0b'] }, // r=1
+      { color: 1, nodes: ['0', '1-0', '2-1', '3-2'], edges: ['0-0', '1-0b', '2-1a'] }, // r=0
+      { color: 2, nodes: ['0', '1-1', '2-2', '3-4'], edges: ['0-1', '1-1a', '2-2a'] }, // r=1
+    ];
+
+    document.querySelectorAll<HTMLElement>('.ct-figure').forEach((fig) => {
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      function clearHighlights() {
+        fig.querySelectorAll('.ct-node').forEach((n) => {
+          n.classList.remove('ct-r-0', 'ct-r-1', 'ct-r-2', 'is-highlighted');
+        });
+        fig.querySelectorAll('.ct-edge').forEach((e) => {
+          e.classList.remove('ct-r-0', 'ct-r-1', 'ct-r-2', 'is-highlighted');
+        });
+      }
+
+      function showRollouts(count: number) {
+        clearHighlights();
+        const toShow = ROLLOUTS.slice(0, count);
+        toShow.forEach((r) => {
+          r.nodes.forEach((pos) => {
+            const node = pos === '0'
+              ? fig.querySelector('.ct-node-prompt')
+              : fig.querySelector(`[data-pos="${pos}"]`);
+            if (node) {
+              node.classList.add(`ct-r-${r.color}`);
+              node.classList.add('is-highlighted');
+            }
+          });
+          r.edges.forEach((e) => {
+            const edge = fig.querySelector(`[data-edge="${e}"]`);
+            if (edge) {
+              edge.classList.add(`ct-r-${r.color}`);
+              edge.classList.add('is-highlighted');
+            }
+          });
+        });
+
+        const callouts = [
+          'One rollout walks one path. The terminal reward is 1 (correct). Without more rollouts, we have no idea whether this path is reliable or lucky.',
+          'Three rollouts. Two get r=1 (correct), one gets r=0. The group mean is 2/3; the advantage tells the policy: paths similar to the winners are above-average, the loser is below-average. This is GRPO\'s baseline in action.',
+          'All possible paths shown. Half lead to r=1, half to r=0. In practice we can\'t enumerate the tree — but we can sample more aggressively to cover it better. Higher rollout.n in GRPO does exactly this.',
+        ];
+        calloutEl.textContent = callouts[Math.min(count - 1, 2)];
+      }
+
+      function showAll() {
+        clearHighlights();
+        // Highlight all edges and nodes
+        fig.querySelectorAll('.ct-node, .ct-edge').forEach((n) => {
+          n.classList.add('is-highlighted');
+        });
+        calloutEl.textContent = 'All possible paths shown. Half lead to r=1, half to r=0. In practice we can\'t enumerate the tree — but we can sample more aggressively to cover it better. Higher rollout.n in GRPO does exactly this.';
+      }
+
+      fig.querySelector('[data-control="show-1"]')!.addEventListener('click', () => showRollouts(1));
+      fig.querySelector('[data-control="show-3"]')!.addEventListener('click', () => showRollouts(3));
+      fig.querySelector('[data-control="show-all"]')!.addEventListener('click', showAll);
+
+      showRollouts(1);
+    });
+  })();
+</script>
+
+<style>
+  .ct-figure { margin: 2.5rem 0; max-width: 880px; }
+  .ct-controls { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .ct-btn {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.85rem;
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .ct-btn:hover { background: var(--code-bg); border-color: var(--accent); }
+  .ct-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .ct-circle {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.5;
+    transition: all 250ms ease;
+  }
+  .ct-node-prompt .ct-circle { fill: var(--text-muted); stroke: var(--text-muted); }
+  .ct-node-final .ct-circle { fill: var(--bg-elevated); }
+  .ct-node.is-highlighted .ct-circle { stroke-width: 2.5; }
+  .ct-node.ct-r-0.is-highlighted .ct-circle { stroke: var(--accent); fill: var(--accent); }
+  .ct-node.ct-r-1.is-highlighted .ct-circle { stroke: #4a8a3d; fill: #4a8a3d; }
+  .ct-node.ct-r-2.is-highlighted .ct-circle { stroke: #d08a3e; fill: #d08a3e; }
+
+  .ct-edge {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.4;
+    transition: all 250ms ease;
+  }
+  .ct-edge.is-highlighted { opacity: 1; stroke-width: 2.5; }
+  .ct-edge.ct-r-0.is-highlighted { stroke: var(--accent); }
+  .ct-edge.ct-r-1.is-highlighted { stroke: #4a8a3d; }
+  .ct-edge.ct-r-2.is-highlighted { stroke: #d08a3e; }
+
+  .ct-node-label {
+    fill: var(--text-muted);
+    font-size: 9.5px;
+    font-family: var(--font-mono);
+  }
+  .ct-leaf-label {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  .ct-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .ct-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>

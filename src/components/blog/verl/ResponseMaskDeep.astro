@@ -1,0 +1,243 @@
+---
+// Viz — response_mask deep dive. Same trajectory shown with three lenses:
+// raw tokens, response_mask coloring, and loss-relevance (only mask=1
+// contributes to loss).
+---
+
+<figure class="rmd-figure" aria-label="response_mask deep view">
+  <div class="rmd-tabs" role="tablist">
+    <button type="button" role="tab" class="rmd-tab active" data-lens="tokens"   aria-selected="true">tokens</button>
+    <button type="button" role="tab" class="rmd-tab"        data-lens="mask"     aria-selected="false">response_mask</button>
+    <button type="button" role="tab" class="rmd-tab"        data-lens="loss"     aria-selected="false">loss contribution</button>
+    <button type="button" role="tab" class="rmd-tab"        data-lens="logprob"  aria-selected="false">log-probs</button>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="rmd-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <g data-region="tokens"></g>
+    <g data-region="legend"></g>
+    <g data-region="lens-label"></g>
+  </svg>
+
+  <div class="rmd-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    The same multi-turn trajectory under four different views. The <em>tokens</em> view shows
+    which segment came from where (user, agent, tool, agent). The <em>mask</em> view colors
+    each token by <code>response_mask</code> (1 = policy generated, 0 = observation). The
+    <em>loss</em> view shows what the training loss actually sees — zero contribution from mask=0.
+    The <em>log-probs</em> view shows the per-token log-probability the policy assigned.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    // Synthetic trajectory: user prompt, agent turn 1, tool response, agent turn 2, tool response, agent turn 3 (final)
+    type Segment = { role: 'user' | 'agent' | 'tool' | 'final'; tokens: number; mask: 0 | 1 };
+    const SEGMENTS: Segment[] = [
+      { role: 'user',  tokens: 18, mask: 0 },
+      { role: 'agent', tokens: 22, mask: 1 },
+      { role: 'tool',  tokens: 3,  mask: 0 },
+      { role: 'agent', tokens: 18, mask: 1 },
+      { role: 'tool',  tokens: 2,  mask: 0 },
+      { role: 'final', tokens: 8,  mask: 1 },
+    ];
+
+    const TOTAL_TOKENS = SEGMENTS.reduce((a, s) => a + s.tokens, 0);
+    const X_START = 30;
+    const X_END = 700;
+    const TOK_W = (X_END - X_START) / TOTAL_TOKENS;
+    const ROW_H = 28;
+    const ROW_Y = 80;
+
+    function renderTokens(parent: SVGGElement, lens: string) {
+      parent.replaceChildren();
+      let cursor = 0;
+      SEGMENTS.forEach((seg, segIdx) => {
+        for (let i = 0; i < seg.tokens; i++) {
+          const x = X_START + cursor * TOK_W;
+          const tokIdx = cursor;
+          // Cell color depends on lens
+          let cls = '';
+          let height = ROW_H;
+          if (lens === 'tokens') {
+            cls = `rmd-tok rmd-tok-${seg.role}`;
+          } else if (lens === 'mask') {
+            cls = seg.mask === 1 ? 'rmd-tok rmd-tok-mask-1' : 'rmd-tok rmd-tok-mask-0';
+          } else if (lens === 'loss') {
+            cls = seg.mask === 1 ? 'rmd-tok rmd-tok-loss-on' : 'rmd-tok rmd-tok-loss-off';
+            height = seg.mask === 1 ? ROW_H : 4;
+          } else if (lens === 'logprob') {
+            // Synthesize per-token log-probs: only meaningful where mask=1
+            const seed = tokIdx * 13 + 7;
+            const r = ((seed * 9301 + 49297) % 233280) / 233280;
+            cls = seg.mask === 1 ? 'rmd-tok rmd-tok-logp' : 'rmd-tok rmd-tok-logp-off';
+            // Height varies for logprob
+            height = seg.mask === 1 ? 10 + r * (ROW_H - 10) : 4;
+          }
+          const y = lens === 'loss' ? ROW_Y + (ROW_H - height) : lens === 'logprob' ? ROW_Y + (ROW_H - height) : ROW_Y;
+          el('rect', {
+            x: x + 0.5, y, width: Math.max(0.5, TOK_W - 1), height,
+            class: cls,
+          }, parent);
+          cursor++;
+        }
+        // Segment boundary tick
+        cursor;
+      });
+
+      // Segment labels
+      let cur2 = 0;
+      SEGMENTS.forEach((seg) => {
+        const midX = X_START + (cur2 + seg.tokens / 2) * TOK_W;
+        el('text', { x: midX, y: ROW_Y - 8, class: 'rmd-seg-label', 'text-anchor': 'middle' }, parent).textContent = seg.role;
+        cur2 += seg.tokens;
+      });
+
+      // Axis label
+      el('text', { x: (X_START + X_END) / 2, y: ROW_Y + ROW_H + 22, class: 'rmd-axis-label', 'text-anchor': 'middle' }, parent).textContent = `${TOTAL_TOKENS} tokens →`;
+    }
+
+    function renderLegend(parent: SVGGElement, lens: string) {
+      parent.replaceChildren();
+      const legends: Record<string, { color: string; label: string }[]> = {
+        tokens: [
+          { color: 'var(--text-faint)', label: 'user' },
+          { color: 'var(--accent)', label: 'agent' },
+          { color: 'var(--text-muted)', label: 'tool' },
+        ],
+        mask: [
+          { color: 'var(--accent)', label: 'mask = 1 (policy)' },
+          { color: 'var(--text-faint)', label: 'mask = 0 (observation)' },
+        ],
+        loss: [
+          { color: 'var(--accent)', label: 'contributes to loss' },
+          { color: 'var(--border-strong)', label: 'no loss contribution' },
+        ],
+        logprob: [
+          { color: 'var(--accent)', label: 'per-token log-prob (mask=1 only)' },
+          { color: 'var(--border-strong)', label: 'not applicable (mask=0)' },
+        ],
+      };
+      const items = legends[lens] || [];
+      items.forEach((it, i) => {
+        const x = 30 + i * 230;
+        const y = 195;
+        el('rect', { x, y, width: 14, height: 10, fill: it.color, opacity: 0.85, rx: 1 }, parent);
+        el('text', { x: x + 20, y: y + 9, class: 'rmd-legend-label' }, parent).textContent = it.label;
+      });
+    }
+
+    function renderLensLabel(parent: SVGGElement, lens: string) {
+      parent.replaceChildren();
+      const labels: Record<string, string> = {
+        tokens: '"who said what" — raw conversation segments',
+        mask: 'response_mask tensor — what the model produced vs what it observed',
+        loss: 'what the actor loss actually sums over — only mask=1 positions',
+        logprob: 'per-token log-prob the policy assigned (used to compute the IS ratio)',
+      };
+      el('text', { x: 30, y: 30, class: 'rmd-lens-title' }, parent).textContent = `lens: ${lens}`;
+      el('text', { x: 30, y: 50, class: 'rmd-lens-sub' }, parent).textContent = labels[lens] || '';
+    }
+
+    const CALLOUTS: Record<string, string> = {
+      tokens: 'The trajectory is a sequence of segments. The user starts with a prompt; the agent generates a turn; a tool responds; the agent continues; another tool response; the agent\'s final answer. All concatenated into one token stream.',
+      mask: 'The response_mask tensor labels every token: 1 if the policy generated it, 0 otherwise. User prompts and tool outputs are mask=0 — the model conditions on them but is not trained to produce them.',
+      loss: 'The actor loss only sees mask=1 positions. Mask=0 tokens are completely ignored by the loss machinery. Token-level loss aggregation = sum over mask=1 tokens divided by the count of mask=1 tokens.',
+      logprob: 'The policy assigns a log-probability to every token it generates. These are stored and used later: as "old log-probs" in the importance-sampling ratio, and indirectly in the KL term against the reference.',
+    };
+
+    document.querySelectorAll<HTMLElement>('.rmd-figure').forEach((fig) => {
+      const tokensG = fig.querySelector<SVGGElement>('[data-region="tokens"]')!;
+      const legendG = fig.querySelector<SVGGElement>('[data-region="legend"]')!;
+      const lensLabelG = fig.querySelector<SVGGElement>('[data-region="lens-label"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.rmd-tab'));
+
+      function show(lens: string) {
+        renderTokens(tokensG, lens);
+        renderLegend(legendG, lens);
+        renderLensLabel(lensLabelG, lens);
+        calloutEl.textContent = CALLOUTS[lens] || '';
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show(t.getAttribute('data-lens') || 'tokens');
+        });
+      });
+
+      show('tokens');
+    });
+  })();
+</script>
+
+<style>
+  .rmd-figure { margin: 2.5rem 0; max-width: 880px; }
+  .rmd-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .rmd-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .rmd-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .rmd-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .rmd-figure :global(.rmd-tok-user)  { fill: var(--text-faint); opacity: 0.5; }
+  .rmd-figure :global(.rmd-tok-agent) { fill: var(--accent); opacity: 0.85; }
+  .rmd-figure :global(.rmd-tok-tool)  { fill: var(--text-muted); opacity: 0.5; }
+  .rmd-figure :global(.rmd-tok-final) { fill: var(--accent); opacity: 0.95; }
+  .rmd-figure :global(.rmd-tok-mask-1) { fill: var(--accent); opacity: 0.85; }
+  .rmd-figure :global(.rmd-tok-mask-0) { fill: var(--text-faint); opacity: 0.4; }
+  .rmd-figure :global(.rmd-tok-loss-on)  { fill: var(--accent); opacity: 0.85; }
+  .rmd-figure :global(.rmd-tok-loss-off) { fill: var(--border-strong); opacity: 0.6; }
+  .rmd-figure :global(.rmd-tok-logp)     { fill: var(--accent); opacity: 0.85; }
+  .rmd-figure :global(.rmd-tok-logp-off) { fill: var(--border-strong); opacity: 0.4; }
+  .rmd-figure :global(.rmd-seg-label) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .rmd-figure :global(.rmd-axis-label) { fill: var(--text-faint); font-size: 10.5px; font-family: var(--font-sans); }
+  .rmd-figure :global(.rmd-legend-label) { fill: var(--text-muted); font-size: 10.5px; font-family: var(--font-sans); }
+  .rmd-figure :global(.rmd-lens-title) {
+    fill: var(--text);
+    font-size: 13px;
+    font-family: var(--font-serif);
+    font-weight: 600;
+  }
+  .rmd-figure :global(.rmd-lens-sub) { fill: var(--text-muted); font-size: 11px; font-family: var(--font-sans); }
+  .rmd-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .rmd-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>
