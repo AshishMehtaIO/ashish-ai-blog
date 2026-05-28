@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { url } from '../../utils/url';
+import { getCollection } from 'astro:content';
 
 const series = {
   title: 'A systems view of LLM RL',
@@ -97,20 +98,29 @@ const posts = [
 
 const fmt = (d: string) =>
   new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+
+// Show all chapters in local dev; in the production build only show released (non-draft) posts.
+const entries = await getCollection('blog');
+const releasedSlugs = new Set(
+  entries.filter((p) => import.meta.env.DEV || !p.data.draft).map((p) => p.id)
+);
+const visiblePosts = posts.filter((p) => releasedSlugs.has(p.slug));
 ---
 
 <BaseLayout title={`${series.title} — series`} description={series.tagline}>
   <article class="series">
     <header class="series-hero">
-      <span class="series-eyebrow">series · {posts.length} posts</span>
+      <span class="series-eyebrow">series · {visiblePosts.length} posts</span>
       <h1>{series.title}</h1>
       <p class="series-tagline">{series.tagline}</p>
       <p class="series-author">by <a href={url('about')}>{series.author}</a></p>
-      <p class="series-starthere">
-        New here? Start with <a href={url('blog/llm-rl-systems-overview/')}>the systems overview</a>,
-        or jump to <a href={url('blog/llm-rl-design-patterns/')}>the design-patterns synthesis</a>
-        for the map.
-      </p>
+      {visiblePosts.length > 0 && (
+        <p class="series-starthere">
+          New here? Start with <a href={url('blog/llm-rl-systems-overview/')}>the systems overview</a>,
+          or jump to <a href={url('blog/llm-rl-design-patterns/')}>the design-patterns synthesis</a>
+          for the map.
+        </p>
+      )}
     </header>
 
     <section class="series-audience">
@@ -125,7 +135,7 @@ const fmt = (d: string) =>
     <section class="series-chapters">
       <h2>Chapters</h2>
       <ol class="chapter-list">
-        {posts.map((p) => (
+        {visiblePosts.map((p) => (
           <li>
             <a href={url(`blog/${p.slug}/`)} class="chapter-link">
               <span class="chapter-num">{p.n}</span>
