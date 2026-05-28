@@ -2,7 +2,7 @@
 title: "A mental model of VERL"
 description: "How an open-source LLM RL framework actually works — single-controller orchestration, the unifying advantage estimator, multi-turn agent loops, and where it strains today."
 pubDate: 2026-05-22
-author: "Ashish"
+author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf"]
 ---
 
@@ -37,7 +37,7 @@ These three pressures — model size, the training-vs-inference split, and multi
 
 VERL's answer is a **single-controller orchestration model** sitting on top of multi-controller worker groups, with pluggable training backends (FSDP, Megatron-LM), pluggable rollout backends (vLLM, SGLang, Hugging Face), a unified data container that flows between them, and a small number of algorithmic abstractions general enough that adding a new RL algorithm (like DAPO) is mostly a config recipe rather than a new module. That sentence is dense; the rest of this post unpacks it.
 
-This is the design described in the HybridFlow paper, which reports throughput improvements of **1.53×–20.57×** over comparable systems.<Sidenote id="sn-throughput-caveat">Numbers from the paper. Real-world speedups depend enormously on model size, cluster shape, algorithm, and how much of the workload is rollout-bound versus training-bound. Treat the range as evidence the design choices are *defensible*, not as a guarantee for your setup.</Sidenote> Performance is not our focus — the mental model is. But the existence of those numbers is part of why the design is worth studying: the abstractions are not paying a heavy performance tax.
+This is the design described in the HybridFlow paper, which reports throughput improvements of **1.53×–20.57×** over comparable systems.<Sidenote id="sn-throughput-caveat">All throughput numbers in this post are from the HybridFlow paper (Sheng et al. 2024); we have not independently reproduced them. Real-world speedups depend enormously on model size, cluster shape, algorithm, and how much of the workload is rollout-bound versus training-bound. Treat the range as evidence the design choices are *defensible*, not as a guarantee for your setup.</Sidenote> Performance is not our focus — the mental model is. But the existence of those numbers is part of why the design is worth studying: the abstractions are not paying a heavy performance tax.
 
 ### What the rest of this post covers
 

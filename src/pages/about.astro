@@ -3,28 +3,191 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import { url } from '../utils/url';
 ---
 
-<BaseLayout title="About — Ashish">
+<BaseLayout title="About — Ashish Mehta" description="Ashish Mehta — engineer at Hippocratic AI. Writes about LLM RL systems, distributed ML infrastructure, and the things in between.">
   <article class="about prose">
-    <h1>About</h1>
-    <p>
-      I'm Ashish — an engineer. This is where I write about the things I'm
-      building, the ideas I'm chewing on, and the occasional rabbit hole.
-    </p>
-    <p>
-      Best way to reach me is over email. The RSS feed is at
-      <a href={url('rss.xml')}>/rss.xml</a>.
-    </p>
+    <header class="about-hero">
+      <div class="about-hero-photo">
+        <!-- Replace with a real headshot at /headshot.jpg -->
+        <img src={url('headshot.jpg')} alt="Ashish Mehta" onerror="this.style.visibility='hidden'" />
+      </div>
+      <div class="about-hero-text">
+        <h1>Ashish Mehta</h1>
+        <p class="about-role">Engineer · Hippocratic AI</p>
+        <p class="about-tagline">
+          I work on reinforcement learning systems for large language models — the
+          infrastructure that turns "you have a base model and a reward signal" into
+          "you have a fine-tuned model that actually does the thing."
+        </p>
+      </div>
+    </header>
+
+    <section>
+      <h2>About this site</h2>
+      <p>
+        This is where I write long-form notes on the systems I work with. The headline
+        piece right now is <a href={url('series/llm-rl/')}>A systems view of LLM RL</a>,
+        an eight-post series on how an open-source LLM RL framework (VERL) is put
+        together — the design decisions, the algorithm interface, the engine split,
+        the multi-turn agent machinery, and what it takes to scale. The series is
+        meant for RL practitioners who want the systems context and for systems
+        engineers who want the RL context.
+      </p>
+      <p>
+        I publish what I write as I learn it. The posts are detailed because the
+        questions are detailed; the visualizations are interactive because the
+        systems are interactive.
+      </p>
+    </section>
+
+    <section>
+      <h2>Selected work</h2>
+      <ul class="about-list">
+        <li>
+          <strong><a href={url('series/llm-rl/')}>A systems view of LLM RL</a></strong>
+          (2026) — Eight-post technical series on LLM RL frameworks. Tens of
+          thousands of words, 40+ hand-authored interactive visualizations.
+        </li>
+        <li>
+          <em>(More entries will land here as the body of work grows. If you want
+          something specific surfaced — papers, talks, projects — message me.)</em>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Find me</h2>
+      <ul class="about-list about-links">
+        <li><strong>Email:</strong> <a href="mailto:ashish@hippocraticai.com">ashish@hippocraticai.com</a></li>
+        <li><strong>GitHub:</strong> <a href="https://github.com/AshishMehtaIO" target="_blank" rel="noopener">@AshishMehtaIO</a></li>
+        <li><strong>LinkedIn:</strong> <a href="https://www.linkedin.com/in/ashishmehtaio/" target="_blank" rel="noopener">in/ashishmehtaio</a></li>
+        <li><strong>Google Scholar:</strong> <a href="https://scholar.google.com/" target="_blank" rel="noopener">profile</a> <em class="about-hint">(link to be updated)</em></li>
+        <li><strong>RSS:</strong> <a href={url('rss.xml')}>{url('rss.xml')}</a></li>
+      </ul>
+    </section>
+
+    <section class="about-cite">
+      <h2>Citing this work</h2>
+      <p>
+        If you reference posts from this site in academic or professional work, here is a
+        citation template:
+      </p>
+      <pre class="about-bibtex">{`@misc{mehta2026llmrl,
+  author       = {Ashish Mehta},
+  title        = {A systems view of LLM RL},
+  year         = {2026},
+  url          = {https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl/},
+  note         = {Online; published as a series of blog posts}
+}`}</pre>
+    </section>
   </article>
 </BaseLayout>
 
 <style>
   .about {
-    max-width: var(--content-width);
+    max-width: var(--content-width-wide);
     margin: 5rem auto;
     padding: 0 1.5rem;
   }
-  .about h1 {
-    font-size: 2.25rem;
-    margin: 0 0 1.5rem;
+
+  .about-hero {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 1.75rem;
+    align-items: center;
+    margin-bottom: 3rem;
+  }
+  @media (max-width: 640px) {
+    .about-hero { grid-template-columns: 1fr; text-align: center; }
+    .about-hero-photo { justify-self: center; }
+  }
+
+  .about-hero-photo {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--code-bg);
+    border: 1px solid var(--border-strong);
+  }
+  .about-hero-photo img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .about-hero-text h1 {
+    margin: 0 0 0.4rem;
+    font-size: clamp(2rem, 5vw, 2.5rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+
+  .about-role {
+    margin: 0 0 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  .about-tagline {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+
+  section {
+    margin: 2.5rem 0;
+  }
+  section h2 {
+    font-size: 1.35rem;
+    margin: 0 0 0.85rem;
+  }
+
+  .about-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .about-list li {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .about-list li:last-child { border-bottom: none; }
+
+  .about-links li strong {
+    display: inline-block;
+    min-width: 120px;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .about-hint {
+    color: var(--text-faint);
+    font-size: 0.85rem;
+    margin-left: 0.35rem;
+  }
+
+  .about-cite {
+    padding: 1rem 1.25rem;
+    background: var(--code-bg);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent);
+  }
+  .about-cite h2 { margin-top: 0; }
+  .about-bibtex {
+    margin: 0.5rem 0 0;
+    padding: 0.85rem 1rem;
+    background: var(--bg);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
   }
 </style>

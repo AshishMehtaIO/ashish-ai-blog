@@ -1,0 +1,292 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { url } from '../../utils/url';
+
+const series = {
+  title: 'A systems view of LLM RL',
+  tagline: 'LLM RL frameworks are a new kind of distributed system. They have to bridge training and inference engines, orchestrate heterogeneous phases, move weights between layouts every iteration, and let one trainer file express PPO, GRPO, and DAPO. This series walks their design space, with VERL as the worked example.',
+  author: 'Ashish Mehta',
+};
+
+const posts = [
+  {
+    slug: 'verl-mental-model',
+    n: '01',
+    title: 'A mental model of VERL',
+    pubDate: '2026-05-22',
+    summary: 'The systems-level overview. Single-controller orchestration, the unifying advantage estimator, multi-turn agent loops, and where the framework strains.',
+  },
+  {
+    slug: 'verl-algorithm-zoo',
+    n: '02',
+    title: "PPO, GRPO, DAPO, and friends: VERL's algorithm zoo",
+    pubDate: '2026-05-23',
+    summary: 'The algorithm interface. Five RL algorithms expressed as specializations of one advantage-estimator + KL-placement function.',
+  },
+  {
+    slug: 'verl-reward-functions',
+    n: '03',
+    title: 'Reward functions in VERL: rule, model, composite, and PRM',
+    pubDate: '2026-05-24',
+    summary: 'Where the learning signal comes from. Rule-based scoring, learned RMs, composition, the five reward-hacking patterns, and how to layer a PRM on top.',
+  },
+  {
+    slug: 'verl-multi-turn-agentloop',
+    n: '04',
+    title: 'Multi-turn rollouts and AgentLoop in VERL',
+    pubDate: '2026-05-25',
+    summary: 'The coroutine state machine, the response_mask trick, tool integration, multi-turn reward design, and the templating landmines.',
+  },
+  {
+    slug: 'verl-environments-tools',
+    n: '05',
+    title: 'Custom environments and tools for VERL agents',
+    pubDate: '2026-05-26',
+    summary: 'Why there\'s no formal Env class. The @function_tool anatomy. Sandboxed code execution. Search, browser, RAG patterns. Failure modes.',
+  },
+  {
+    slug: 'verl-backends-internals',
+    n: '06',
+    title: 'The backends behind VERL: vLLM, SGLang, FSDP, Megatron',
+    pubDate: '2026-05-27',
+    summary: 'Why training and inference engines have opposite design pressures and how the 3D-HybridEngine bridges them. PagedAttention, RadixAttention, FSDP all-gather, Megatron TP×PP×DP.',
+  },
+  {
+    slug: 'verl-scaling-async',
+    n: '07',
+    title: 'Scaling VERL: parameter resharding, async rollout, and what changes at 70B+',
+    pubDate: '2026-05-28',
+    summary: 'Where the bottleneck migrates as you scale. Parameter resharding internals, one-step-off vs fully async, NCCL primitives, memory budgeting, three case studies.',
+  },
+  {
+    slug: 'verl-debugging-evaluation',
+    n: '08',
+    title: 'Debugging, evaluating, and observing VERL training runs',
+    pubDate: '2026-05-28',
+    summary: 'The operational side. Canonical metrics, healthy-vs-sick fingerprints, the five named failure modes, train-vs-prod drift, a debugging playbook.',
+  },
+];
+
+const fmt = (d: string) =>
+  new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+---
+
+<BaseLayout title={`${series.title} — series`} description={series.tagline}>
+  <article class="series">
+    <header class="series-hero">
+      <span class="series-eyebrow">series · {posts.length} posts</span>
+      <h1>{series.title}</h1>
+      <p class="series-tagline">{series.tagline}</p>
+      <p class="series-author">by <a href={url('about')}>{series.author}</a></p>
+    </header>
+
+    <section class="series-audience">
+      <h2>Who this is for</h2>
+      <ul>
+        <li><strong>RL practitioners</strong> who know PPO and want the systems context that makes modern frameworks fast.</li>
+        <li><strong>Systems engineers</strong> who know distributed training and want the RL context that explains why LLM RL frameworks look the way they do.</li>
+        <li><strong>Researchers + engineers</strong> evaluating which framework to use, or building one of their own.</li>
+      </ul>
+    </section>
+
+    <section class="series-chapters">
+      <h2>Chapters</h2>
+      <ol class="chapter-list">
+        {posts.map((p) => (
+          <li>
+            <a href={url(`blog/${p.slug}/`)} class="chapter-link">
+              <span class="chapter-num">{p.n}</span>
+              <div class="chapter-body">
+                <span class="chapter-title">{p.title}</span>
+                <p class="chapter-summary">{p.summary}</p>
+                <time class="chapter-date" datetime={p.pubDate}>{fmt(p.pubDate)}</time>
+              </div>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section class="series-cite">
+      <h2>Citing this series</h2>
+      <p>
+        For papers, dossiers, or formal references, please use:
+      </p>
+      <pre class="series-bibtex">{`@misc{mehta2026llmrl,
+  author       = {Ashish Mehta},
+  title        = {A systems view of LLM RL},
+  year         = {2026},
+  url          = {https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl/},
+  note         = {Eight-post technical series}
+}`}</pre>
+      <p class="series-cite-alt">
+        Plain text: Mehta, A. (2026). <em>A systems view of LLM RL.</em> Retrieved from
+        <code>https://ashishmehtaio.github.io/ashish-ai-blog/series/llm-rl/</code>.
+      </p>
+    </section>
+  </article>
+</BaseLayout>
+
+<style>
+  .series {
+    max-width: var(--content-width-wide);
+    margin: 5rem auto;
+    padding: 0 1.5rem;
+    font-family: var(--font-serif);
+  }
+
+  .series-hero {
+    margin-bottom: 3rem;
+    padding-bottom: 2.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .series-eyebrow {
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-faint);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 0.85rem;
+  }
+
+  .series-hero h1 {
+    font-size: clamp(2.25rem, 6vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 1rem;
+    font-weight: 600;
+  }
+
+  .series-tagline {
+    font-size: 1.15rem;
+    line-height: 1.6;
+    color: var(--text);
+    max-width: 36em;
+    margin: 0 0 1rem;
+  }
+
+  .series-author {
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    margin: 0;
+  }
+  .series-author a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .series-author a:hover { text-decoration: underline; }
+
+  section {
+    margin: 3rem 0;
+  }
+  section h2 {
+    font-size: 1.4rem;
+    margin: 0 0 1rem;
+    font-weight: 600;
+  }
+
+  .series-audience ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .series-audience li {
+    padding: 0.5rem 0;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .series-audience li strong { color: var(--accent); }
+
+  .chapter-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .chapter-list li {
+    border-bottom: 1px solid var(--border);
+  }
+  .chapter-list li:last-child { border-bottom: none; }
+
+  .chapter-link {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+    padding: 1.5rem 0;
+    text-decoration: none;
+    color: var(--text);
+    transition: background 150ms ease;
+  }
+  .chapter-link:hover { background: var(--code-bg); }
+  .chapter-link:hover .chapter-title { color: var(--accent); }
+
+  .chapter-num {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    color: var(--text-faint);
+    font-weight: 600;
+    padding-top: 0.1rem;
+  }
+
+  .chapter-body { min-width: 0; }
+
+  .chapter-title {
+    display: block;
+    font-size: 1.2rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    margin-bottom: 0.4rem;
+    transition: color 150ms ease;
+  }
+
+  .chapter-summary {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+
+  .chapter-date {
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    color: var(--text-faint);
+  }
+
+  .series-cite {
+    padding: 1.25rem 1.5rem;
+    background: var(--code-bg);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent);
+  }
+  .series-cite h2 { margin-top: 0; }
+  .series-cite p { font-size: 0.95rem; }
+  .series-bibtex {
+    margin: 0.5rem 0;
+    padding: 0.85rem 1rem;
+    background: var(--bg);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .series-cite-alt {
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+  .series-cite-alt code {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    background: var(--bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+</style>

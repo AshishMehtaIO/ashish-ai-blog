@@ -39,6 +39,8 @@ const fmt = (d: Date) =>
       <div class="publish-metadata">
         <span class="author">{author}</span>
         <span class="separator">·</span>
+        <span class="affiliation">Hippocratic AI</span>
+        <span class="separator">·</span>
         <time datetime={pubDate.toISOString()}>{fmt(pubDate)}</time>
         {updatedDate && (
           <>

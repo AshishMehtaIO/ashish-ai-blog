@@ -1,8 +1,8 @@
 ---
 title: "PPO, GRPO, DAPO, and friends: VERL's algorithm zoo"
 description: "A working tour of the five RL algorithms VERL implements — how each one computes the policy gradient signal, when it dominates, and what its knobs do."
-pubDate: 2026-05-29
-author: "Ashish"
+pubDate: 2026-05-23
+author: "Ashish Mehta"
 tags: ["verl", "rl", "llm", "rlhf", "ppo", "grpo", "dapo"]
 ---
 
@@ -172,7 +172,7 @@ There is no critic to configure — that part of the trainer simply doesn't run.
 
 ## §4 — RLOO: REINFORCE with a leave-one-out baseline
 
-[RLOO](https://arxiv.org/abs/2402.14740) is GRPO's older cousin. The setup is identical — sample $N$ responses per prompt, score each — but the baseline is computed differently: for response $i$, the baseline is the *mean of the other $N-1$ responses*.
+[RLOO](https://arxiv.org/abs/2402.14740) and GRPO are structural siblings — both from early 2024, both critic-free, both built around sampling a group of $N$ responses per prompt. They differ in the baseline: GRPO uses the group mean (normalized by std); RLOO uses a *leave-one-out* baseline. For response $i$, the baseline is the *mean of the other $N-1$ responses*.
 
 $$
 \hat{A}^{(i)} = r^{(i)} - \frac{1}{N-1} \sum_{j \neq i} r^{(j)}
