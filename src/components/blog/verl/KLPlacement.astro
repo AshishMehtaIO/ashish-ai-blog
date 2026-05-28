@@ -1,0 +1,246 @@
+---
+// Viz — KL placement: in-reward vs in-loss. Side-by-side dataflow showing how
+// the KL term takes a different path through the algorithm depending on
+// algorithm.use_kl_in_reward.
+---
+
+<figure class="kl-figure" aria-label="KL placement comparison">
+  <div class="kl-tabs" role="tablist">
+    <button type="button" role="tab" class="kl-tab active" data-mode="in-reward" aria-selected="true">KL in reward</button>
+    <button type="button" role="tab" class="kl-tab"        data-mode="in-loss"   aria-selected="false">KL in loss</button>
+    <button type="button" role="tab" class="kl-tab"        data-mode="both"      aria-selected="false">Compare side-by-side</button>
+  </div>
+
+  <svg viewBox="0 0 720 380" class="kl-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <marker id="kl-arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+    <g data-region="diagram"></g>
+  </svg>
+
+  <div class="kl-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    The KL term penalizes divergence from the reference policy. In-reward KL is subtracted from
+    each token's reward and flows through the advantage estimator — for PPO it propagates via
+    GAE; for GRPO it is absorbed into the group baseline. In-loss KL is added directly to the
+    actor loss with its own coefficient, bypassing advantage computation. The two are
+    mathematically distinct.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    function box(parent: SVGGElement, x: number, y: number, w: number, h: number, label: string, sub: string, klass: string) {
+      const g = el('g', { class: `kl-box ${klass}`, transform: `translate(${x} ${y})` }, parent) as SVGGElement;
+      el('rect', { x: 0, y: 0, width: w, height: h, rx: 6, class: 'kl-rect' }, g);
+      el('text', { x: w / 2, y: h / 2 - 2, class: 'kl-label', 'text-anchor': 'middle' }, g).textContent = label;
+      if (sub) {
+        el('text', { x: w / 2, y: h / 2 + 13, class: 'kl-sub', 'text-anchor': 'middle' }, g).textContent = sub;
+      }
+      return g;
+    }
+
+    function arrow(parent: SVGGElement, x1: number, y1: number, x2: number, y2: number, label: string, klass = '') {
+      const dx = x2 - x1, dy = y2 - y1;
+      const d = `M ${x1} ${y1} L ${x2} ${y2}`;
+      el('path', { d, class: `kl-arrow ${klass}`, fill: 'none', 'marker-end': 'url(#kl-arrowhead)' }, parent);
+      if (label) {
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        el('text', { x: mx + 6, y: my - 6, class: 'kl-arrow-label' }, parent).textContent = label;
+      }
+    }
+
+    function drawFlow(parent: SVGGElement, mode: 'in-reward' | 'in-loss', xOffset = 0, scale = 1, titleOpt?: string) {
+      const x = (v: number) => xOffset + v * scale;
+      const y = (v: number) => v;
+
+      if (titleOpt) {
+        el('text', { x: x(160), y: y(20), class: 'kl-flow-title', 'text-anchor': 'middle' }, parent).textContent = titleOpt;
+      }
+
+      // Step 1: reward
+      box(parent, x(80), y(40), 160, 48, 'reward r', 'rule + RM', 'kl-box-prep');
+      // Step 2: depends on mode
+      if (mode === 'in-reward') {
+        // KL adjustment box
+        box(parent, x(80), y(110), 160, 48, 'r − β · KL', 'token-level KL', 'kl-box-prep kl-box-highlight');
+        arrow(parent, x(160), y(88), x(160), y(110), '');
+        // Then advantage
+        box(parent, x(80), y(180), 160, 48, 'advantage Â', 'GAE / group', 'kl-box-prep');
+        arrow(parent, x(160), y(158), x(160), y(180), '');
+        // Then loss
+        box(parent, x(80), y(250), 160, 48, 'actor loss', 'clipped surrogate', 'kl-box-train');
+        arrow(parent, x(160), y(228), x(160), y(250), '');
+      } else {
+        // No KL in reward step
+        box(parent, x(80), y(110), 160, 48, 'advantage Â', 'GAE / group', 'kl-box-prep');
+        arrow(parent, x(160), y(88), x(160), y(110), '');
+        // Loss = surrogate + KL
+        box(parent, x(80), y(180), 160, 48, 'actor loss', 'surrogate + β·KL', 'kl-box-train kl-box-highlight');
+        arrow(parent, x(160), y(158), x(160), y(180), '');
+      }
+
+      // Reference model and KL term, on the side
+      const refY = mode === 'in-reward' ? y(110) : y(180);
+      box(parent, x(-100), y(refY - 24), 130, 48, 'reference π_ref', 'frozen', 'kl-box-frozen');
+      arrow(parent, x(30), y(refY), x(80), y(refY), 'KL', 'kl-arrow-emphasis');
+    }
+
+    function renderMode(diagramG: SVGGElement, mode: 'in-reward' | 'in-loss' | 'both') {
+      diagramG.replaceChildren();
+      if (mode === 'both') {
+        drawFlow(diagramG, 'in-reward', 100, 1.0, 'KL in reward');
+        drawFlow(diagramG, 'in-loss', 480, 1.0, 'KL in loss');
+      } else {
+        drawFlow(diagramG, mode, 180, 1.4);
+      }
+    }
+
+    const CALLOUTS = {
+      'in-reward': 'KL in reward: at every generated token, subtract β · KL(π_θ || π_ref) from the reward before computing advantages. The KL signal flows through whatever advantage estimator you use — GAE for PPO will propagate it across time; GRPO will absorb part of it into the group-relative baseline. Conventional default for PPO.',
+      'in-loss': 'KL in loss: the actor loss gains an explicit β · KL term that the optimizer minimizes directly. No interaction with the advantage estimator. Conventional default for GRPO/DAPO, where the per-response group baseline doesn\'t usefully credit-assign per-token KL.',
+      'both': 'The two paths give different gradients. In-reward routes KL through credit assignment. In-loss adds it as an external penalty. You can also set β=0 in one path and use the other; you can run with both on simultaneously but you should know what you\'re doing.',
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.kl-figure').forEach((fig) => {
+      const diagramG = fig.querySelector<SVGGElement>('[data-region="diagram"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.kl-tab'));
+
+      function show(mode: 'in-reward' | 'in-loss' | 'both') {
+        renderMode(diagramG, mode);
+        calloutEl.textContent = CALLOUTS[mode];
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show((t.getAttribute('data-mode') || 'in-reward') as 'in-reward' | 'in-loss' | 'both');
+        });
+      });
+
+      show('in-reward');
+    });
+  })();
+</script>
+
+<style>
+  .kl-figure {
+    margin: 2.5rem 0;
+    max-width: 880px;
+  }
+  .kl-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .kl-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .kl-tab:hover { color: var(--text); border-color: var(--accent); }
+  .kl-tab.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .kl-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  /* :global() — boxes/arrows are created dynamically */
+  .kl-figure :global(.kl-rect) {
+    fill: var(--bg);
+    stroke: var(--border-strong);
+    stroke-width: 1.25;
+    transition: all 200ms ease;
+  }
+  .kl-figure :global(.kl-box-prep .kl-rect)   { fill: #dde5f3; stroke: #4a78c2; }
+  .kl-figure :global(.kl-box-train .kl-rect)  { fill: #e3d9f3; stroke: #6b4ab8; }
+  .kl-figure :global(.kl-box-frozen .kl-rect) { fill: #dff0f7; stroke: #6cabc7; }
+  .kl-figure :global(.kl-box-highlight .kl-rect) {
+    stroke-width: 2.5;
+    stroke: var(--accent);
+  }
+  .kl-figure :global(.kl-label) {
+    fill: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font-serif);
+  }
+  .kl-figure :global(.kl-sub) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+  }
+  .kl-figure :global(.kl-arrow) {
+    stroke: var(--text-muted);
+    stroke-width: 1.4;
+  }
+  .kl-figure :global(.kl-arrow-emphasis) {
+    stroke: var(--accent);
+    stroke-width: 1.8;
+  }
+  .kl-figure :global(#kl-arrowhead path) {
+    fill: var(--text-muted);
+  }
+  .kl-figure :global(.kl-arrow-label) {
+    fill: var(--accent);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .kl-figure :global(.kl-flow-title) {
+    fill: var(--text);
+    font-size: 13px;
+    font-family: var(--font-sans);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .kl-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .kl-callout p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+</style>

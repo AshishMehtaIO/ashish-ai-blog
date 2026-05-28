@@ -1,0 +1,274 @@
+---
+// Viz — Generalized Advantage Estimation explorer. Show how λ interpolates
+// between TD(0) (low variance, high bias) and Monte Carlo (high variance,
+// low bias). Reward is at the last token; advantage propagates backward.
+---
+
+<figure class="gae-figure" aria-label="GAE advantage propagation explorer">
+  <div class="gae-controls">
+    <label class="gae-slider">
+      <span class="gae-control-label">λ (lambda)</span>
+      <input type="range" min="0" max="100" step="1" value="95" data-control="lambda" />
+      <output data-readout="lambda">0.95</output>
+    </label>
+    <label class="gae-slider">
+      <span class="gae-control-label">γ (discount)</span>
+      <input type="range" min="80" max="100" step="1" value="100" data-control="gamma" />
+      <output data-readout="gamma">1.00</output>
+    </label>
+    <div class="gae-presets" role="group" aria-label="Lambda presets">
+      <button type="button" class="gae-preset" data-lambda="0">λ=0 · TD(0)</button>
+      <button type="button" class="gae-preset" data-lambda="50">λ=0.5</button>
+      <button type="button" class="gae-preset" data-lambda="100">λ=1 · MC</button>
+    </div>
+  </div>
+
+  <svg viewBox="0 0 720 320" class="gae-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <!-- Sequence layout: 20 tokens left to right -->
+    <text x="20" y="40" class="gae-row-label">reward r_t</text>
+    <text x="20" y="130" class="gae-row-label">value V(s_t)</text>
+    <text x="20" y="240" class="gae-row-label">advantage Â_t</text>
+
+    <line class="gae-baseline" x1="100" y1="65" x2="700" y2="65" />
+    <line class="gae-baseline" x1="100" y1="155" x2="700" y2="155" />
+    <line class="gae-baseline" x1="100" y1="265" x2="700" y2="265" />
+
+    <g data-region="reward"></g>
+    <g data-region="value"></g>
+    <g data-region="advantage"></g>
+
+    <text x="400" y="300" class="gae-axis-label" text-anchor="middle">token position →</text>
+  </svg>
+
+  <div class="gae-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    The reward is placed at the last response token. The value function predicts expected return
+    from each position. The advantage at each token is GAE's weighted sum of TD residuals,
+    parameterized by γ and λ. λ=0 trusts the critic entirely (low variance, high bias). λ=1
+    ignores the critic and uses the future reward sum minus the current value (high variance,
+    low bias).
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    const T = 20;             // sequence length
+    const X_START = 105;
+    const X_END = 695;
+    const BAR_W = (X_END - X_START) / T - 2;
+    const STEP_X = (X_END - X_START) / T;
+
+    // Synthetic per-token reward: 0 everywhere, +1 at the last token
+    const rewards: number[] = Array(T).fill(0);
+    rewards[T - 1] = 1.0;
+
+    // Synthetic value estimates — show a critic that's "kind of right":
+    // ramping up from 0 to ~0.7 as we approach the end (predicting return)
+    const values: number[] = Array(T).fill(0).map((_, i) => {
+      const frac = i / (T - 1);
+      return 0.1 + 0.6 * frac;
+    });
+    // V(s_T) = 0 (terminal value)
+    const valuesPlusOne = [...values, 0];
+
+    function computeGAE(gamma: number, lam: number) {
+      const adv = Array(T).fill(0);
+      let gae = 0;
+      for (let t = T - 1; t >= 0; t--) {
+        const delta = rewards[t] + gamma * valuesPlusOne[t + 1] - values[t];
+        gae = delta + gamma * lam * gae;
+        adv[t] = gae;
+      }
+      return adv;
+    }
+
+    function callout(lam: number, gamma: number): string {
+      if (lam < 0.05) return 'λ ≈ 0: each token\'s advantage is just the local TD residual r_t + γV(s_{t+1}) − V(s_t). The advantage at non-terminal tokens depends entirely on the critic — if it\'s wrong, every advantage is wrong, but it\'s low-variance.';
+      if (lam > 0.95) return 'λ ≈ 1: GAE collapses to Monte Carlo — the advantage at each token is the actual future return minus the current value. No bias from the critic, but maximum variance from the noisy reward signal.';
+      return `λ = ${lam.toFixed(2)}: GAE interpolates. Earlier tokens see a weighted sum of future TD residuals decaying at rate γλ ≈ ${(gamma * lam).toFixed(2)}. This is usually the sweet spot — moderate variance, moderate bias.`;
+    }
+
+    document.querySelectorAll<HTMLElement>('.gae-figure').forEach((fig) => {
+      const rewardG = fig.querySelector<SVGGElement>('[data-region="reward"]')!;
+      const valueG = fig.querySelector<SVGGElement>('[data-region="value"]')!;
+      const advG = fig.querySelector<SVGGElement>('[data-region="advantage"]')!;
+      const lamInput = fig.querySelector<HTMLInputElement>('[data-control="lambda"]')!;
+      const gammaInput = fig.querySelector<HTMLInputElement>('[data-control="gamma"]')!;
+      const lamReadout = fig.querySelector<HTMLOutputElement>('[data-readout="lambda"]')!;
+      const gammaReadout = fig.querySelector<HTMLOutputElement>('[data-readout="gamma"]')!;
+      const presets = Array.from(fig.querySelectorAll<HTMLButtonElement>('.gae-preset'));
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+
+      function render() {
+        const lam = parseInt(lamInput.value, 10) / 100;
+        const gamma = parseInt(gammaInput.value, 10) / 100;
+        lamReadout.value = lam.toFixed(2);
+        gammaReadout.value = gamma.toFixed(2);
+
+        rewardG.replaceChildren();
+        valueG.replaceChildren();
+        advG.replaceChildren();
+
+        // Reward bars (small, all 0 except last)
+        for (let t = 0; t < T; t++) {
+          const x = X_START + t * STEP_X + 1;
+          const h = Math.max(2, rewards[t] * 40);
+          el('rect', { x, y: 65 - h, width: BAR_W, height: h, class: 'gae-bar gae-bar-reward' }, rewardG);
+        }
+        // Value bars
+        for (let t = 0; t < T; t++) {
+          const x = X_START + t * STEP_X + 1;
+          const h = Math.max(2, values[t] * 60);
+          el('rect', { x, y: 155 - h, width: BAR_W, height: h, class: 'gae-bar gae-bar-value' }, valueG);
+        }
+        // Advantage bars (signed)
+        const adv = computeGAE(gamma, lam);
+        const maxAbs = Math.max(0.05, ...adv.map(a => Math.abs(a)));
+        for (let t = 0; t < T; t++) {
+          const x = X_START + t * STEP_X + 1;
+          const h = (adv[t] / maxAbs) * 60;
+          const y = h >= 0 ? 265 - h : 265;
+          el('rect', { x, y, width: BAR_W, height: Math.abs(h), class: `gae-bar ${h >= 0 ? 'gae-bar-pos' : 'gae-bar-neg'}` }, advG);
+        }
+
+        calloutEl.textContent = callout(lam, gamma);
+      }
+
+      lamInput.addEventListener('input', render);
+      gammaInput.addEventListener('input', render);
+      presets.forEach((p) => {
+        p.addEventListener('click', () => {
+          lamInput.value = p.getAttribute('data-lambda') || '95';
+          render();
+        });
+      });
+
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .gae-figure {
+    margin: 2.5rem 0;
+    max-width: 880px;
+  }
+  .gae-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 1.25rem;
+    align-items: end;
+    margin-bottom: 0.6rem;
+  }
+  @media (max-width: 640px) {
+    .gae-controls { grid-template-columns: 1fr; }
+  }
+  .gae-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.55rem;
+    align-items: center;
+  }
+  .gae-control-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .gae-slider input[type="range"] { accent-color: var(--accent); }
+  .gae-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 2.5rem;
+    text-align: right;
+  }
+  .gae-presets {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+  }
+  .gae-preset {
+    font-family: var(--font-sans);
+    font-size: 0.74rem;
+    padding: 0.3rem 0.6rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .gae-preset:hover { color: var(--text); border-color: var(--accent); }
+
+  .gae-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .gae-row-label {
+    fill: var(--text);
+    font-size: 12px;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-weight: 600;
+  }
+  .gae-baseline {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+  .gae-axis-label {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-sans);
+    letter-spacing: 0.04em;
+  }
+
+  /* :global(): bars are created via JS */
+  .gae-figure :global(.gae-bar-reward) {
+    fill: #4a8a3d;
+    opacity: 0.9;
+  }
+  .gae-figure :global(.gae-bar-value) {
+    fill: #d08a3e;
+    opacity: 0.85;
+  }
+  .gae-figure :global(.gae-bar-pos) {
+    fill: var(--accent);
+    opacity: 0.85;
+  }
+  .gae-figure :global(.gae-bar-neg) {
+    fill: #b85c5c;
+    opacity: 0.85;
+  }
+
+  .gae-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .gae-callout p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+</style>

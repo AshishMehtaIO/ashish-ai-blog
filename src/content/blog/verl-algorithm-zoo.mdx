@@ -1,0 +1,433 @@
+---
+title: "PPO, GRPO, DAPO, and friends: VERL's algorithm zoo"
+description: "A working tour of the five RL algorithms VERL implements — how each one computes the policy gradient signal, when it dominates, and what its knobs do."
+pubDate: 2026-05-29
+author: "Ashish"
+tags: ["verl", "rl", "llm", "rlhf", "ppo", "grpo", "dapo"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import ClipSurrogate from '../../components/blog/verl/ClipSurrogate.astro';
+import GAEExplorer from '../../components/blog/verl/GAEExplorer.astro';
+import GRPOGroupSampling from '../../components/blog/verl/GRPOGroupSampling.astro';
+import KLPlacement from '../../components/blog/verl/KLPlacement.astro';
+import ISRatioExplorer from '../../components/blog/verl/ISRatioExplorer.astro';
+import AlgorithmDecisionTree from '../../components/blog/verl/AlgorithmDecisionTree.astro';
+import AlgorithmMatrix from '../../components/blog/verl/AlgorithmMatrix.astro';
+
+[VERL](https://github.com/verl-project/verl) supports five RL algorithms for fine-tuning language models — PPO, GRPO, RLOO, REINFORCE++, and DAPO — selected by a single config key. This post is the working tour. We walk each algorithm, name what it adds and what it drops, render the math in its useful final form, and end with a decision tree for picking one.
+
+A claim the intro post in this series made: **the algorithms differ in *one place*, and the rest of VERL's machinery is unchanged.** That is the design's most elegant property and the reason adding a new algorithm — DAPO is the canonical example — is mostly a config recipe rather than a fork.<Sidenote id="sn-intro-recap">If you read the [intro post](/ashish-ai-blog/blog/verl-mental-model/), this is the §5 expansion. If you didn't, you don't need to — this post is self-contained. It assumes you know classical RL at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) level and have seen PPO at least once.</Sidenote>
+
+We will earn that claim with the math. By the end you should be able to: read VERL's [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) without surprises; choose an algorithm for a given workload; and reason about which hyperparameters to touch when training misbehaves.
+
+We will not earn it with benchmarks. Performance comparisons depend on workload, scale, and tuning — they belong in a separate post.
+
+## §1 — The unifying view, in one paragraph
+
+Every RL algorithm in VERL has the same shape: sample a batch of prompts, generate response(s) with the current policy, compute a reward per response, turn rewards into a per-token *advantage signal*, and take a clipped policy-gradient step that uses that signal. The algorithms differ in **how the advantage signal is computed** and (orthogonally) **where the KL constraint to the reference policy lives**. Everything else — the rollout engine, the reference forward pass, the optimizer, the loss aggregation — is shared. VERL exposes the algorithm choice as `algorithm.adv_estimator`, which selects one function in [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py). The rest of the loop is identical.
+
+<AlgorithmMatrix />
+
+This matrix is the destination. The next eight sections derive how we get there.
+
+## §2 — PPO from first principles
+
+[Proximal Policy Optimization](https://arxiv.org/abs/1707.06347) is the workhorse and the only algorithm in this post that uses a critic. Everything here generalizes.
+
+### The policy gradient
+
+The policy gradient theorem says: to maximize expected reward, take a step in the direction of $\nabla_\theta \log \pi_\theta(a|s) \cdot \hat{A}(s, a)$, where $\hat{A}$ is some estimate of how much better action $a$ is than the average action at state $s$. For an LLM, $s$ is the prompt + everything generated so far, $a$ is the next token, and $\hat{A}$ is what we have to construct from the reward we observe.
+
+### Importance sampling
+
+To make PPO sample-efficient, the same rollout is reused for several gradient steps. But the policy that *generated* the rollout (call it $\pi_{\text{old}}$) is not exactly the policy we are training at the current update step ($\pi_\theta$). We correct for the mismatch with the *importance-sampling ratio*:
+
+$$
+\rho_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_{\text{old}}}(a_t | s_t)}
+$$
+
+If $\theta = \theta_{\text{old}}$ this is 1. As we drift, the ratio drifts. The pseudo-objective becomes $\mathbb{E}_t[\rho_t \hat{A}_t]$, which is unbiased — as long as the ratio doesn't go too far.
+
+### The clipped surrogate
+
+When $\rho_t$ goes far from 1, the importance correction can explode and inject huge variance. PPO's fix is to clip the ratio:
+
+$$
+\mathcal{L}^{\text{actor}}(\theta) = -\mathbb{E}_t\!\left[\min\!\big(\rho_t \hat{A}_t, \ \text{clip}(\rho_t, 1{-}\epsilon, 1{+}\epsilon)\, \hat{A}_t\big)\right]
+$$
+
+The `min` means the gradient is *not* pessimistically clipped when the gradient would improve the objective — only when it would push past the clip on the wrong side. The result is a soft trust region.
+
+<ClipSurrogate />
+
+VERL exposes `actor.clip_range` (the $\epsilon$) and also supports decoupled `actor.cliprange_low` / `actor.cliprange_high` — used by DAPO and discussed in §6.
+
+<Sidenote id="sn-clip-asym">A subtle point worth knowing: the clip is *asymmetric in effect* even when $\epsilon$ is symmetric. When $\hat{A}_t > 0$, the clip activates at $1 + \epsilon$ (prevents over-increasing probability). When $\hat{A}_t < 0$, it activates at $1 - \epsilon$ (prevents over-decreasing). DAPO's contribution is making this asymmetry configurable.</Sidenote>
+
+### What to plug in for $\hat{A}_t$: GAE
+
+For PPO we need a per-token advantage. We can't just use the response-level reward — every token's gradient would get the same scalar, drowning credit assignment. We use Generalized Advantage Estimation ([Schulman et al. 2015](https://arxiv.org/abs/1506.02438)).
+
+Given the per-token reward $r_t$ (which in LLM RL is usually 0 except at the last response token, plus the per-token KL penalty if `use_kl_in_reward` is on) and a value function $V_\phi$ (the *critic*, predicting expected return from $s_t$), the temporal-difference residual is:
+
+$$
+\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)
+$$
+
+GAE is an exponentially-weighted sum of these residuals:
+
+$$
+\hat{A}_t^{\text{GAE}} = \sum_{l=0}^{T-t-1} (\gamma \lambda)^l \, \delta_{t+l}
+$$
+
+Two knobs:
+- **$\gamma$** (`algorithm.gamma`): the discount factor. For LLM RL, $\gamma = 1$ is common — episodes are short and discounting under-credits the early reasoning steps.
+- **$\lambda$** (`algorithm.lam`): the GAE bias-variance dial. $\lambda = 0$ reduces to single-step TD (low variance, high bias). $\lambda = 1$ reduces to Monte Carlo returns minus the baseline (high variance, low bias). $0.95$ is the conventional default; for long-horizon reasoning $0.99$ is sometimes better.
+
+<GAEExplorer />
+
+### The critic
+
+The critic predicts $V_\phi(s_t)$ at every token. It is typically a value head on the same backbone as the actor, with its own loss:
+
+$$
+\mathcal{L}^{\text{critic}} = \mathbb{E}_t[(V_\phi(s_t) - G_t)^2]
+$$
+
+where $G_t = \hat{A}_t + V_\phi(s_t)$ is the GAE-derived return target. VERL's [`CriticWorker`](https://github.com/verl-project/verl/tree/main/verl/workers) handles this; the loss is in [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) as `compute_value_loss`.
+
+### What PPO costs
+
+Five operational facts about PPO that the next sections will let us shed:
+- A separate critic model. Doubles parameter memory if the critic has its own backbone; even with a value head, you double activations.
+- Critic training instability. A bad critic gives bad advantages, which trains a bad actor, which makes the critic see weirder states.
+- Per-token value forward passes. Extra compute.
+- A hyperparameter to set: $\lambda$.
+- Sample inefficiency for tasks with a clean per-prompt reward. GAE shines when reward is dense; for math problems with one terminal reward, the critic learns a step function and most of GAE's machinery is overkill.
+
+That last bullet is the lever GRPO pulls.
+
+## §3 — GRPO: dropping the critic
+
+[Group Relative Policy Optimization](https://arxiv.org/abs/2402.03300) (from DeepSeekMath) is critic-free. Its insight: when reward is terminal and per-prompt, sampling several responses to the same prompt and using the group's own statistics as the baseline gives you everything the critic was supposed to provide.
+
+### The setup
+
+For each prompt $x$, draw $N$ responses $y^{(1)}, \dots, y^{(N)} \sim \pi_\theta(\cdot | x)$. Score each with the reward function:
+
+$$
+r^{(i)} = R(x, y^{(i)})
+$$
+
+Compute the group mean and standard deviation:
+
+$$
+\mu = \frac{1}{N}\sum_i r^{(i)}, \quad \sigma = \sqrt{\frac{1}{N}\sum_i (r^{(i)} - \mu)^2}
+$$
+
+The advantage for response $i$, **broadcast to every token of that response**:
+
+$$
+\hat{A}^{(i)}_t = \frac{r^{(i)} - \mu}{\sigma}
+$$
+
+That's it. No critic, no GAE, no temporal-difference residuals. The same PPO clipped surrogate eats this advantage and produces a gradient.
+
+<GRPOGroupSampling />
+
+### Why this works
+
+The group mean is a sample-based baseline. Subtracting a baseline reduces variance without introducing bias (this is true for any function of the *state*, not the action — and the group mean depends on the prompt, not the response). Dividing by $\sigma$ normalizes the gradient scale across prompts that have different reward magnitudes, which makes training stable across mixed-difficulty batches.
+
+### The price
+
+GRPO trades critic compute for *generation* compute. You now sample $N$ responses per prompt instead of 1. VERL's config knob is `rollout.n = N`. Typical values: 4, 8, 16. Larger $N$ = lower-variance advantage estimate, more rollout compute.
+
+A subtler price: GRPO breaks when the group is degenerate. If all $N$ responses get the same reward (everyone fails, everyone succeeds), $\sigma \to 0$ and the advantage explodes (or is undefined). DAPO addresses this directly; we cover it in §6.
+
+### The config
+
+```yaml
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true   # divide by σ
+rollout:
+  n: 8                             # group size
+```
+
+There is no critic to configure — that part of the trainer simply doesn't run.
+
+### When GRPO wins
+
+- Tasks with a clean per-prompt reward: math (verifiable), code (test suite), formatted output (regex).
+- Smaller compute budgets where the critic's overhead matters.
+- When you want to ablate quickly — fewer moving parts, less to tune.
+
+### When GRPO loses
+
+- Reward varies *within* a response (per-step reward, partial credit). GRPO's terminal-reward broadcast wastes that signal.
+- Very long responses where the same response-level advantage being assigned to every token loses important per-token nuance. (Mitigation: loss aggregation choice; see §6.)
+- When you can't afford 8× generation per prompt.
+
+## §4 — RLOO: REINFORCE with a leave-one-out baseline
+
+[RLOO](https://arxiv.org/abs/2402.14740) is GRPO's older cousin. The setup is identical — sample $N$ responses per prompt, score each — but the baseline is computed differently: for response $i$, the baseline is the *mean of the other $N-1$ responses*.
+
+$$
+\hat{A}^{(i)} = r^{(i)} - \frac{1}{N-1} \sum_{j \neq i} r^{(j)}
+$$
+
+This is the leave-one-out estimator. It avoids the slight bias of using a response's own reward in its own baseline (which GRPO does — the group mean includes $r^{(i)}$).
+
+### What RLOO doesn't have
+
+- No $\sigma$ normalization. RLOO's authors argue this isn't needed and adds variance; in practice, VERL's implementation may or may not normalize depending on config.
+- No clipping. RLOO is REINFORCE with a baseline — no importance-sampling ratio appears, because the assumption is that the rollouts are on-policy enough not to need it. (VERL's RLOO can be paired with PPO-style clipping in code; check the recipe you're using.)
+
+### When RLOO wins
+
+Anywhere GRPO wins. RLOO is older, slightly simpler, and was the dominant choice before GRPO got popular. The two are close enough that the choice between them is rarely the most important tuning decision in your run.
+
+### When RLOO loses
+
+When variance is high enough that you wish you had $\sigma$ normalization. When you want PPO's trust region (use GRPO instead, with the clipped surrogate).
+
+### The config
+
+```yaml
+algorithm:
+  adv_estimator: rloo
+rollout:
+  n: 8
+```
+
+## §5 — REINFORCE++: minimalism with stabilizers
+
+[REINFORCE++](https://arxiv.org/abs/2501.03262) is the *baseline reduced to a scalar*. No group sampling, no critic, no GAE. Just:
+
+$$
+\hat{A}_t = r_t - b
+$$
+
+where $b$ is a running scalar baseline (typically the exponential moving average of recent rewards, or zero). For long-form responses, this is broadcast to every token as in GRPO.
+
+### Why it exists
+
+GRPO and PPO both add machinery. GRPO needs group sampling; PPO needs a critic. REINFORCE++ asks: what if you just need a sane signal and don't want either? The answer is: pure REINFORCE works surprisingly well *if* you add a few stabilizers.
+
+The stabilizers (varies by implementation):
+- A running scalar baseline (or none).
+- Token-level loss aggregation (instead of sequence-level) — long correct responses contribute proportionally rather than getting diluted.
+- Optional KL penalty in the reward.
+- Optional symmetric clipping (the PPO clip, applied to REINFORCE++).
+
+VERL's config:
+
+```yaml
+algorithm:
+  adv_estimator: reinforce_plus_plus
+actor:
+  loss_agg_mode: token-mean
+```
+
+### When REINFORCE++ wins
+
+- Very small models where the critic memory is genuinely too much and group sampling at $N \geq 4$ is also expensive.
+- Quick prototyping when you want the fewest moving parts.
+- Tasks where you trust the reward enough to do without variance reduction.
+
+### When REINFORCE++ loses
+
+Higher-variance training. The simpler the algorithm, the more the run depends on getting reward and learning rate right.
+
+## §6 — DAPO: GRPO with three recipe-level tweaks
+
+[DAPO](https://arxiv.org/abs/2503.14476) is what happens when a group studying RL for math reasoning takes GRPO seriously and asks: *what would we change?* Their answer is three modifications, each small, none of which require new infrastructure in VERL — every one of them is a config flag on the existing machinery.
+
+This is the post's hidden point: **DAPO didn't require a new advantage estimator, a new worker, or a new training loop.** It is the strongest evidence for the "everything else is shared" claim.
+
+### Tweak 1: asymmetric clipping (cliprange_low ≠ cliprange_high)
+
+Standard PPO uses a single $\epsilon$. DAPO decouples it into two:
+
+$$
+\mathcal{L}^{\text{actor}}_{\text{DAPO}} = -\mathbb{E}_t\!\left[\min\!\big(\rho_t \hat{A}_t, \ \text{clip}(\rho_t, 1{-}\epsilon_{\text{low}}, 1{+}\epsilon_{\text{high}})\, \hat{A}_t\big)\right]
+$$
+
+When $\hat{A}_t > 0$ (the action was good — boost it), the binding clip is $1 + \epsilon_{\text{high}}$. When $\hat{A}_t < 0$ (the action was bad — suppress it), the binding clip is $1 - \epsilon_{\text{low}}$. Making these independent lets you say things like "I want to *aggressively* upweight good actions ($\epsilon_{\text{high}}$ large) but only *modestly* downweight bad ones ($\epsilon_{\text{low}}$ small)."
+
+DAPO's paper reports $\epsilon_{\text{low}} = 0.2$, $\epsilon_{\text{high}} = 0.28$ as a productive setting on math reasoning. The asymmetry serves to maintain exploration: it's easier for a probability to go up than down, so the policy doesn't collapse around early winners.
+
+VERL:
+
+```yaml
+actor:
+  cliprange_low: 0.2
+  cliprange_high: 0.28
+```
+
+<Sidenote id="sn-clip-direction">The standard PPO clip already has direction-dependent behavior because of the `min`. DAPO's contribution is letting you *configure* the asymmetry. With $\epsilon_{\text{low}} = \epsilon_{\text{high}}$ you recover plain PPO/GRPO.</Sidenote>
+
+### Tweak 2: dynamic sampling
+
+Recall GRPO's failure mode: if every response in a group earns the same reward, the advantage is undefined (or zero everywhere). The batch yielded no signal.
+
+DAPO's fix: when generating, keep resampling prompts until you have enough groups with *non-degenerate* reward variance. A degenerate group (everyone passed, or everyone failed) gets thrown away and replaced.
+
+This is implemented in the rollout loop, not the advantage estimator. It costs more generation compute but spends it on data that will actually train the policy.
+
+### Tweak 3: token-level loss aggregation
+
+In sequence-level aggregation (the PPO default), the loss is averaged within each sequence first, then across sequences. A 200-token response and a 4000-token response contribute equally to the gradient, because each is normalized to one "score."
+
+In token-level aggregation, the loss is summed over all tokens and divided by total token count. A 4000-token correct response now contributes proportionally — 4000/(4000 + 15·200) ≈ 57% of the gradient signal.
+
+For long-form reasoning, where length correlates with quality, token-level is what you want. Long correct chains of reasoning should not be diluted by being long.
+
+```yaml
+actor:
+  loss_agg_mode: token-mean   # default in DAPO recipe
+```
+
+Bonus tweak the paper also adds: a *soft length penalty* shaping the reward when responses approach the hard context limit. Not a new abstraction in VERL — just a custom reward function that subtracts based on length.
+
+### What DAPO is, in one line
+
+GRPO + (asymmetric clip ε's) + (filter degenerate groups) + (token-level loss). Three config flags. The same training loop.
+
+## §7 — KL placement: an orthogonal axis
+
+Every algorithm above can pair with a KL constraint to the reference policy. The constraint exists to prevent the policy from drifting catastrophically from the SFT starting point — the language-modeling capability would erode and you'd lose the ability to produce sensible text.
+
+The KL term is *orthogonal* to the advantage estimator: you can put it in the reward or in the loss, and you can use any of several estimators. VERL exposes both choices through `algorithm.use_kl_in_reward`.
+
+<KLPlacement />
+
+### KL in reward
+
+Set `algorithm.use_kl_in_reward: true`. The per-token KL between the policy and the reference is subtracted from the per-token reward *before* advantage computation:
+
+$$
+r'_t = r_t - \beta \cdot \mathrm{KL}\!\left[\pi_\theta(\cdot | s_t) \,\|\, \pi_{\text{ref}}(\cdot | s_t)\right]
+$$
+
+The advantage estimator then runs on $r'$. The KL signal flows through whatever credit-assignment machinery the algorithm uses (GAE for PPO, group baseline for GRPO).
+
+### KL in loss
+
+Set `algorithm.use_kl_in_reward: false` and configure `algorithm.kl_loss_coef`. The KL term is added directly to the actor loss as a separate term, with its own coefficient:
+
+$$
+\mathcal{L} = \mathcal{L}^{\text{actor}}_{\text{clip}} + \beta_{\text{loss}} \cdot \mathrm{KL}\!\left[\pi_\theta \,\|\, \pi_{\text{ref}}\right]
+$$
+
+The advantage signal sees the unmodified reward; the KL term is an external regularizer.
+
+### Which to choose
+
+In-reward and in-loss are *mathematically distinct* — they give different gradients except in special cases. In-reward KL gets credit-assigned through your advantage estimator (so GAE will propagate it, GRPO will dilute it into the group-relative baseline); in-loss KL is a clean penalty that does not interact with rewards.
+
+Practical rule:
+- For PPO with GAE, in-reward KL is the more conventional choice — the KL signal flows through TD residuals like any other reward.
+- For GRPO, in-loss KL is often preferred — the group-relative baseline doesn't usefully credit-assign the KL term, since KL is per-token and the GRPO baseline is per-response.
+- For DAPO, the recipe uses neither in a particularly opinionated way; the paper uses KL in loss with low coefficient.
+
+VERL also supports several KL estimator forms (`algorithm.kl_penalty`): the naive log-ratio, the [low-variance estimator](http://joschu.net/blog/kl-approx.html), an MSE form, and the "full" KL (which requires the full vocabulary distribution).
+
+## §8 — Importance sampling, when it bites
+
+PPO's clip exists because the importance-sampling ratio $\rho_t = \exp(\ell_t^{\text{new}} - \ell_t^{\text{old}})$ can blow up. For a single token this is fine. For a 4000-token response, $\rho$ for the full response (the product) can drift drastically — and PPO clips per token, so the issue is constrained, but the *gradient variance* contributed by long tokens can still spike.
+
+<ISRatioExplorer />
+
+The clip is a soft band. When the policy drifts more than $\epsilon$ from the rollout policy, you stop receiving gradient on the over-drifted tokens. This is the trust region. The size of the band sets how aggressively a single PPO inner loop can move the policy. With many epochs and a tight clip, you take many small steps; with few epochs and a loose clip, you take fewer larger steps.
+
+In the algorithms above, REINFORCE++ and RLOO drop the IS ratio entirely. They rely on the rollouts being recent enough that on-policy is a fine approximation. In practice, with one or two PPO epochs (`actor.ppo_epochs: 1` or `2`), they work well. With more epochs, the IS correction starts to matter and clipped algorithms pull ahead.
+
+## §9 — Choosing an algorithm
+
+<AlgorithmDecisionTree />
+
+The questions to ask, in order:
+
+1. **Is the reward verifiable per response?** (Math correctness, code passing tests, regex matching) → strong candidate for **GRPO / RLOO / DAPO**. The clean per-prompt reward makes the group-relative pattern work well.
+
+2. **Do you need fine-grained per-token credit assignment?** (Long chains of reasoning where intermediate steps matter, partial credit, process-level supervision) → consider **PPO with GAE**, despite the critic overhead.
+
+3. **Are responses long-form?** → bias toward **DAPO** (token-mean loss) or PPO with `loss_agg_mode: token-mean`. Don't let length dilute correct answers.
+
+4. **Is generation cost dominant?** → favor smaller `rollout.n`, or REINFORCE++. The compute saved on group sampling can buy you a smaller batch's worth of additional training.
+
+5. **Are you ablating quickly?** → REINFORCE++ first (fewest knobs), then GRPO when you need the variance reduction.
+
+6. **Did GRPO collapse?** (Mode collapse, all-same rewards, reward hacking) → switch to **DAPO**. The dynamic-sampling filter is the headline fix; the asymmetric clip lets you back off on suppressive gradients.
+
+Three case-study sketches:
+
+- **Math RLVR (GSM8K, MATH).** GRPO is the standard; DAPO is the upgrade. Both use rule-based verifier rewards. Group size 8–16 is typical.
+- **Code generation with test-suite rewards.** GRPO or DAPO. Asymmetric clip helps preserve exploration when most generations fail tests.
+- **Helpfulness fine-tuning with a learned RM.** PPO with GAE is the historical baseline. GRPO works when the RM is well-calibrated. Be especially careful about reward hacking — see [the next post in this series](/ashish-ai-blog/blog/verl-reward-functions/) (forthcoming).
+
+## §10 — Hyperparameter intuitions
+
+A field guide. Tune in this order when training misbehaves.
+
+**$\epsilon$ (clip range, `actor.clip_range`):** PPO/GRPO/DAPO. Default 0.2. Smaller (0.1) = more conservative, more PPO epochs needed to make progress. Larger (0.3+) = larger steps per epoch, more variance. DAPO sets asymmetric: $\epsilon_{\text{low}} = 0.2$, $\epsilon_{\text{high}} = 0.28$.
+
+**$\beta$ (KL coefficient, `algorithm.kl_ctrl.kl_coef` or `algorithm.kl_loss_coef`):** typical range $10^{-3}$ to $10^{-1}$. Too low → policy drifts and language fluency degrades. Too high → policy can't improve over the reference. Often run with an *adaptive controller* that targets a desired KL value and adjusts $\beta$.
+
+**$N$ (group size, `rollout.n`):** GRPO/RLOO/DAPO. Larger = lower-variance advantage but more rollout compute. Below 4 the group statistic is too noisy. Above 32 the marginal variance reduction is small. 8 is the sweet spot.
+
+**$\lambda$ (GAE lambda, `algorithm.lam`):** PPO. 0.95 is the conventional starting point. 0.99 for very long horizons. Lower (0.9, 0.8) when the critic is bad — relying more on temporal-difference and less on Monte Carlo lets a noisy critic make less mess.
+
+**`actor.ppo_epochs`:** how many gradient steps per rollout batch. 1 = essentially on-policy. 2–4 is conventional for PPO. With more epochs you reuse the data more but rely more heavily on the IS clip. For REINFORCE++/RLOO without clipping, stay near 1.
+
+**`loss_agg_mode`:** `sequence-mean` (PPO default) vs `token-mean` (DAPO default). Token-mean for long-form reasoning; sequence-mean for short generation. If your responses vary widely in length and you care equally about each, token-mean.
+
+**Reward shaping coefficients:** the *biggest* lever. A 10× change in reward scale is a 10× change in advantage scale, which is a 10× change in gradient norm. Normalize your rewards or expect to retune every other hyperparameter when you change the reward function.
+
+## §11 — Limits
+
+Things these algorithms cannot do.
+
+**Offline preference learning.** PPO/GRPO/etc. all require *online generation* — sampling from the current policy. If you only have a static preference dataset (e.g., human ratings on responses produced by a different model), look at [DPO](https://arxiv.org/abs/2305.18290), [SimPO](https://arxiv.org/abs/2405.14734), [KTO](https://arxiv.org/abs/2402.01306), or [IPO](https://arxiv.org/abs/2310.12036). These do not appear in VERL's main `adv_estimator` list because they aren't fit for that interface — they bypass advantage entirely.
+
+**Per-step process supervision.** All five algorithms in this post assume a *terminal* reward (or terminal-broadcast). If you have step-level annotations — "step 3 is wrong" — you need a process reward model (PRM) and a way to plumb token-level rewards through. VERL's `token_level_scores` tensor *can* carry these, but no native PRM pipeline ships with the framework today. See the [reward functions post](/ashish-ai-blog/blog/verl-reward-functions/) (forthcoming) for how to build this yourself.
+
+**Off-policy correction beyond one or two steps of staleness.** PPO's clip handles a small amount of staleness. Fully async training (the rollout pool is generating ahead of the trainer) needs more care than the clip provides — generally a [V-trace](https://arxiv.org/abs/1802.01561)-style correction. VERL's async work is moving in this direction; see the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/) (forthcoming).
+
+**Multi-agent / self-play.** These exist in RL but are not in scope for VERL's current algorithm set. Plug-and-play self-play would require a parallel-policy rollout abstraction that doesn't exist yet.
+
+## §12 — A mental model
+
+The architecture choice that lets VERL ship all five of these algorithms with one trainer is: **the algorithm is a function in `core_algos.py` plus a small set of config flags.** No subclasses, no plugin registry, no separate loops. The rollout worker, the reference forward pass, the optimizer, the resharding logic, the multi-turn machinery — all unchanged.
+
+The five algorithms above span a real design space. PPO is the most general but pays for it. GRPO is the right answer when reward is per-response. RLOO is GRPO's older sibling. REINFORCE++ is the minimal sane baseline. DAPO is the three-trick refinement of GRPO that became important enough to deserve its own name.
+
+When you read a new VERL config, look at `algorithm.adv_estimator` first — that tells you which advantage shape you're in. Then check `algorithm.use_kl_in_reward` and `algorithm.kl_loss_coef` — that tells you where KL lives. Then `actor.cliprange*` and `actor.loss_agg_mode` — those tell you whether DAPO-style tweaks are on. Everything else is rollout shape, batch sizes, and optimizer hyperparams.
+
+That's the algorithm zoo. The next post in this series goes deep on the other half of the picture: where the rewards themselves come from, including the part we glossed over — building a process reward model on top of VERL when the framework doesn't ship one.
+
+## References
+
+**Algorithms**
+- Schulman, J., Wolski, F., Dhariwal, P., Radford, A., Klimov, O. (2017). *Proximal Policy Optimization Algorithms.* [arXiv:1707.06347](https://arxiv.org/abs/1707.06347).
+- Schulman, J., Moritz, P., Levine, S., Jordan, M., Abbeel, P. (2015). *High-Dimensional Continuous Control Using Generalized Advantage Estimation.* [arXiv:1506.02438](https://arxiv.org/abs/1506.02438).
+- Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Bi, X., Zhang, H., Zhang, M., Li, Y., Wu, Y., Guo, D. (2024). *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.* [arXiv:2402.03300](https://arxiv.org/abs/2402.03300). (Introduces GRPO.)
+- Ahmadian, A., Cremer, C., Gallé, M., Fadaee, M., Kreutzer, J., Pietquin, O., Üstün, A., Hooker, S. (2024). *Back to Basics: Revisiting REINFORCE-Style Optimization for Learning from Human Feedback in LLMs.* [arXiv:2402.14740](https://arxiv.org/abs/2402.14740). (RLOO.)
+- Hu, J. (2025). *REINFORCE++: A Simple and Efficient Approach for Aligning Large Language Models.* [arXiv:2501.03262](https://arxiv.org/abs/2501.03262).
+- Liu, S., Lu, T., Zhuang, Y., et al. (2025). *DAPO: An Open-Source LLM Reinforcement Learning System at Scale.* [arXiv:2503.14476](https://arxiv.org/abs/2503.14476).
+
+**KL & related**
+- Schulman, J. *Approximating KL Divergence.* [Blog post](http://joschu.net/blog/kl-approx.html). (The "low-variance estimator" VERL exposes as `kl_penalty: low_var_kl`.)
+
+**Offline / preference methods (out of scope here)**
+- Rafailov, R., Sharma, A., Mitchell, E., Ermon, S., Manning, C. D., Finn, C. (2023). *Direct Preference Optimization: Your Language Model is Secretly a Reward Model.* [arXiv:2305.18290](https://arxiv.org/abs/2305.18290).
+- Meng, Y., Xia, M., Chen, D. (2024). *SimPO: Simple Preference Optimization with a Reference-Free Reward.* [arXiv:2405.14734](https://arxiv.org/abs/2405.14734).
+- Ethayarajh, K., Xu, W., Muennighoff, N., Jurafsky, D., Kiela, D. (2024). *KTO: Model Alignment as Prospect Theoretic Optimization.* [arXiv:2402.01306](https://arxiv.org/abs/2402.01306).
+
+**VERL source**
+- [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) — all advantage estimators in one file.
+- [`ray_trainer.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py) — the orchestrator.
+- [VERL docs](https://verl.readthedocs.io/en/latest/) — config reference.

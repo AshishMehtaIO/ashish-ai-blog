@@ -1,0 +1,400 @@
+---
+// Viz — Algorithm decision tree. Click through questions about your workload,
+// see the recommended algorithm. Reset at the bottom.
+---
+
+<figure class="dt-figure" aria-label="Algorithm decision tree">
+  <div class="dt-progress">
+    <span class="dt-progress-label">decision path</span>
+    <div class="dt-breadcrumbs" data-region="breadcrumbs"></div>
+  </div>
+
+  <div class="dt-stage" data-region="stage"></div>
+
+  <button type="button" class="dt-reset" data-control="reset">↺ start over</button>
+
+  <figcaption>
+    A practitioner's decision tree for picking an algorithm. Questions are about your workload,
+    not your preferences. The leaves are concrete recommendations with VERL config snippets.
+    Reset at the bottom to retry with different answers.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    type Choice = { label: string; next: string };
+    type Node = {
+      kind: 'question' | 'recommendation';
+      title: string;
+      sub?: string;
+      choices?: Choice[];
+      reco?: { algo: string; config: string; rationale: string };
+    };
+
+    const TREE: Record<string, Node> = {
+      start: {
+        kind: 'question',
+        title: 'Can your reward be computed automatically per response?',
+        sub: 'Examples: math correctness via verifier, code passing unit tests, regex matching a format.',
+        choices: [
+          { label: 'Yes — verifiable per-response reward', next: 'q-fine-grained' },
+          { label: 'No — only have a learned reward model or human preferences', next: 'q-rm-or-offline' },
+        ],
+      },
+      'q-fine-grained': {
+        kind: 'question',
+        title: 'Do you have per-step / per-token reward signal?',
+        sub: 'E.g., a process reward model scoring each reasoning step; partial credit; tool-level rewards.',
+        choices: [
+          { label: 'No — just one terminal reward per response', next: 'q-long-form' },
+          { label: 'Yes — dense per-token signal', next: 'reco-ppo' },
+        ],
+      },
+      'q-long-form': {
+        kind: 'question',
+        title: 'Are responses long-form?',
+        sub: 'Long chain-of-thought reasoning, multi-paragraph generation, code with comments.',
+        choices: [
+          { label: 'Yes — long, varied length', next: 'q-dapo-tweaks' },
+          { label: 'No — short outputs', next: 'q-budget' },
+        ],
+      },
+      'q-dapo-tweaks': {
+        kind: 'question',
+        title: 'Are you seeing degenerate groups (all responses same reward) during training?',
+        sub: 'Or do you want asymmetric exploration vs exploitation in the clip?',
+        choices: [
+          { label: 'Yes / want extra control', next: 'reco-dapo' },
+          { label: 'No, vanilla group baseline is fine', next: 'reco-grpo-long' },
+        ],
+      },
+      'q-budget': {
+        kind: 'question',
+        title: 'Can you afford 4-16x generation per prompt?',
+        sub: 'Group sampling pays for variance reduction with rollout compute.',
+        choices: [
+          { label: 'Yes — comfortable with group sampling', next: 'reco-grpo' },
+          { label: 'No — need to minimize rollout cost', next: 'reco-reinforce-pp' },
+        ],
+      },
+      'q-rm-or-offline': {
+        kind: 'question',
+        title: 'Are you generating online with the current policy?',
+        sub: 'Or do you only have a fixed offline dataset of preferences?',
+        choices: [
+          { label: 'Online generation with a learned RM', next: 'reco-ppo-rm' },
+          { label: 'Offline preference data only', next: 'reco-offline' },
+        ],
+      },
+      'reco-ppo': {
+        kind: 'recommendation',
+        title: 'PPO with GAE',
+        reco: {
+          algo: 'PPO',
+          rationale: 'You have dense per-token signal — GAE can credit-assign it properly. The critic + GAE machinery pays off when reward isn\'t just terminal. Expect to tune γ, λ, and the critic\'s learning rate.',
+          config: 'algorithm:\n  adv_estimator: gae\n  gamma: 1.0\n  lam: 0.95\n  use_kl_in_reward: true\nactor:\n  clip_range: 0.2\n  ppo_epochs: 2',
+        },
+      },
+      'reco-grpo-long': {
+        kind: 'recommendation',
+        title: 'GRPO with token-level loss',
+        reco: {
+          algo: 'GRPO',
+          rationale: 'Group baseline gives clean per-prompt variance reduction without a critic. Token-mean loss prevents long correct answers from being diluted. The default for math-RLVR.',
+          config: 'algorithm:\n  adv_estimator: grpo\n  norm_adv_by_std_in_grpo: true\n  use_kl_in_reward: false\nrollout:\n  n: 8\nactor:\n  clip_range: 0.2\n  loss_agg_mode: token-mean',
+        },
+      },
+      'reco-grpo': {
+        kind: 'recommendation',
+        title: 'GRPO',
+        reco: {
+          algo: 'GRPO',
+          rationale: 'Short responses + verifiable reward + budget for group sampling = textbook GRPO setup. Group size 8 is the conventional starting point.',
+          config: 'algorithm:\n  adv_estimator: grpo\n  norm_adv_by_std_in_grpo: true\nrollout:\n  n: 8\nactor:\n  clip_range: 0.2',
+        },
+      },
+      'reco-dapo': {
+        kind: 'recommendation',
+        title: 'DAPO',
+        reco: {
+          algo: 'DAPO',
+          rationale: 'You want GRPO with three productive tweaks: asymmetric clip (more aggressive boost of good actions, gentler suppression), dynamic sampling (filter degenerate groups), and token-level loss. Active research recipe for math reasoning at scale.',
+          config: 'algorithm:\n  adv_estimator: grpo\n  norm_adv_by_std_in_grpo: true\nrollout:\n  n: 16\nactor:\n  cliprange_low: 0.2\n  cliprange_high: 0.28\n  loss_agg_mode: token-mean\n# dynamic sampling is enabled via the rollout recipe',
+        },
+      },
+      'reco-reinforce-pp': {
+        kind: 'recommendation',
+        title: 'REINFORCE++',
+        reco: {
+          algo: 'REINFORCE++',
+          rationale: 'No critic, no group sampling — single response per prompt with a running scalar baseline. The lightest sane algorithm. Stay near ppo_epochs=1 to keep the rollouts on-policy.',
+          config: 'algorithm:\n  adv_estimator: reinforce_plus_plus\nrollout:\n  n: 1\nactor:\n  ppo_epochs: 1\n  loss_agg_mode: token-mean',
+        },
+      },
+      'reco-ppo-rm': {
+        kind: 'recommendation',
+        title: 'PPO with reward model',
+        reco: {
+          algo: 'PPO',
+          rationale: 'The classical RLHF setup. The learned RM scores responses; GAE distributes the signal. Watch carefully for reward hacking — see the rewards post in this series.',
+          config: 'algorithm:\n  adv_estimator: gae\n  gamma: 1.0\n  lam: 0.95\n  use_kl_in_reward: true\nreward_model:\n  enable: true\n  model:\n    path: <path-to-RM>',
+        },
+      },
+      'reco-offline': {
+        kind: 'recommendation',
+        title: 'DPO / SimPO / KTO (not in this series)',
+        reco: {
+          algo: 'DPO-family',
+          rationale: 'Pure offline preference learning bypasses rollout entirely — there is no advantage estimator. These methods don\'t fit VERL\'s online-RL interface. Consider TRL or a dedicated DPO codebase.',
+          config: '# not a VERL setup — see HuggingFace TRL or similar\nfrom trl import DPOTrainer\n# ...',
+        },
+      },
+    };
+
+    document.querySelectorAll<HTMLElement>('.dt-figure').forEach((fig) => {
+      const stageEl = fig.querySelector<HTMLElement>('[data-region="stage"]')!;
+      const breadcrumbsEl = fig.querySelector<HTMLElement>('[data-region="breadcrumbs"]')!;
+      const resetBtn = fig.querySelector<HTMLButtonElement>('[data-control="reset"]')!;
+
+      let path: { id: string; label: string }[] = [];
+      let currentId = 'start';
+
+      function renderBreadcrumbs() {
+        breadcrumbsEl.replaceChildren();
+        path.forEach((step, i) => {
+          const chip = document.createElement('span');
+          chip.className = 'dt-breadcrumb';
+          chip.textContent = step.label;
+          breadcrumbsEl.appendChild(chip);
+          if (i < path.length - 1) {
+            const sep = document.createElement('span');
+            sep.className = 'dt-breadcrumb-sep';
+            sep.textContent = '→';
+            breadcrumbsEl.appendChild(sep);
+          }
+        });
+        if (path.length === 0) {
+          const hint = document.createElement('span');
+          hint.className = 'dt-breadcrumb-empty';
+          hint.textContent = 'pick an option below';
+          breadcrumbsEl.appendChild(hint);
+        }
+      }
+
+      function renderNode(id: string) {
+        currentId = id;
+        const node = TREE[id];
+        stageEl.replaceChildren();
+
+        if (node.kind === 'question') {
+          const h = document.createElement('h4');
+          h.className = 'dt-question';
+          h.textContent = node.title;
+          stageEl.appendChild(h);
+          if (node.sub) {
+            const sub = document.createElement('p');
+            sub.className = 'dt-question-sub';
+            sub.textContent = node.sub;
+            stageEl.appendChild(sub);
+          }
+          const choices = document.createElement('div');
+          choices.className = 'dt-choices';
+          (node.choices || []).forEach((c) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'dt-choice';
+            btn.textContent = c.label;
+            btn.addEventListener('click', () => {
+              path.push({ id: c.next, label: c.label });
+              renderBreadcrumbs();
+              renderNode(c.next);
+            });
+            choices.appendChild(btn);
+          });
+          stageEl.appendChild(choices);
+        } else {
+          // recommendation
+          const wrap = document.createElement('div');
+          wrap.className = 'dt-reco';
+          const tag = document.createElement('div');
+          tag.className = 'dt-reco-tag';
+          tag.textContent = 'recommended';
+          wrap.appendChild(tag);
+          const h = document.createElement('h4');
+          h.className = 'dt-reco-title';
+          h.textContent = node.title;
+          wrap.appendChild(h);
+          if (node.reco) {
+            const r = document.createElement('p');
+            r.className = 'dt-reco-rationale';
+            r.textContent = node.reco.rationale;
+            wrap.appendChild(r);
+            const code = document.createElement('pre');
+            code.className = 'dt-reco-code';
+            code.textContent = node.reco.config;
+            wrap.appendChild(code);
+          }
+          stageEl.appendChild(wrap);
+        }
+      }
+
+      function reset() {
+        path = [];
+        renderBreadcrumbs();
+        renderNode('start');
+      }
+      resetBtn.addEventListener('click', reset);
+
+      reset();
+    });
+  })();
+</script>
+
+<style>
+  .dt-figure {
+    margin: 2.5rem 0;
+    max-width: 880px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-elevated);
+  }
+  .dt-progress {
+    padding: 0.6rem 1rem;
+    background: var(--code-bg);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .dt-progress-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .dt-breadcrumbs {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    align-items: center;
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    color: var(--text-muted);
+  }
+  /* :global() — dynamically created */
+  .dt-figure :global(.dt-breadcrumb) {
+    padding: 0.15rem 0.5rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+  }
+  .dt-figure :global(.dt-breadcrumb-sep) {
+    color: var(--text-faint);
+  }
+  .dt-figure :global(.dt-breadcrumb-empty) {
+    color: var(--text-faint);
+    font-style: italic;
+  }
+
+  .dt-stage {
+    padding: 1.25rem 1.5rem;
+    min-height: 200px;
+  }
+  .dt-figure :global(.dt-question) {
+    margin: 0 0 0.5rem;
+    font-family: var(--font-serif);
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .dt-figure :global(.dt-question-sub) {
+    margin: 0 0 1rem;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+  .dt-figure :global(.dt-choices) {
+    display: grid;
+    gap: 0.5rem;
+  }
+  .dt-figure :global(.dt-choice) {
+    text-align: left;
+    padding: 0.85rem 1rem;
+    font-family: var(--font-sans);
+    font-size: 0.92rem;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    transition: all 150ms ease;
+  }
+  .dt-figure :global(.dt-choice:hover) {
+    background: var(--code-bg);
+    border-color: var(--accent);
+    transform: translateX(2px);
+  }
+  .dt-figure :global(.dt-reco) {
+    background: var(--code-bg);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    padding: 1rem 1.2rem;
+  }
+  .dt-figure :global(.dt-reco-tag) {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    font-weight: 700;
+    margin-bottom: 0.3rem;
+  }
+  .dt-figure :global(.dt-reco-title) {
+    margin: 0 0 0.6rem;
+    font-family: var(--font-serif);
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .dt-figure :global(.dt-reco-rationale) {
+    margin: 0 0 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .dt-figure :global(.dt-reco-code) {
+    margin: 0;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .dt-reset {
+    margin: 0.75rem 1.25rem 1rem;
+    padding: 0.4rem 0.85rem;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+  .dt-reset:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+</style>

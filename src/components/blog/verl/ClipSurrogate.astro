@@ -1,0 +1,369 @@
+---
+// Viz — PPO clip surrogate landscape. Plot of the surrogate loss as a function
+// of the importance-sampling ratio ρ, for positive and negative advantage A.
+// Toggle the sign of A; slide ε to see the clip move.
+---
+
+<figure class="clip-figure" aria-label="PPO clip surrogate landscape">
+  <div class="clip-controls">
+    <div class="clip-control">
+      <span class="clip-control-label">advantage sign</span>
+      <div class="clip-toggle" role="radiogroup">
+        <button type="button" class="clip-toggle-btn active" data-sign="positive" aria-pressed="true">A &gt; 0 (good action)</button>
+        <button type="button" class="clip-toggle-btn"        data-sign="negative" aria-pressed="false">A &lt; 0 (bad action)</button>
+      </div>
+    </div>
+    <label class="clip-slider">
+      <span class="clip-control-label">clip range ε</span>
+      <input type="range" min="5" max="40" step="1" value="20" data-control="epsilon" />
+      <output data-readout="epsilon">0.20</output>
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 360" class="clip-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <clipPath id="clip-plot-area">
+        <rect x="70" y="30" width="600" height="280" />
+      </clipPath>
+    </defs>
+
+    <!-- Plot frame -->
+    <rect x="70" y="30" width="600" height="280" class="clip-frame" />
+
+    <!-- Grid lines -->
+    <g class="clip-grid" data-region="grid"></g>
+
+    <!-- Zero baseline -->
+    <line class="clip-axis-zero" x1="70" y1="170" x2="670" y2="170" />
+
+    <!-- The clip band region (shaded) -->
+    <rect class="clip-band" data-region="band" />
+
+    <!-- Unclipped surrogate (ρ × A) -->
+    <path class="clip-curve clip-curve-unclipped" data-region="unclipped" fill="none" />
+
+    <!-- Clipped surrogate -->
+    <path class="clip-curve clip-curve-clipped" data-region="clipped" fill="none" />
+
+    <!-- The min() landscape — actual PPO objective -->
+    <path class="clip-curve clip-curve-ppo" data-region="ppo" fill="none" />
+
+    <!-- Axis labels -->
+    <text x="370" y="345" class="clip-axis-label" text-anchor="middle">ρ = π<tspan font-style="italic">_θ</tspan>(a|s) / π<tspan font-style="italic">_old</tspan>(a|s)</text>
+    <text x="30" y="170" class="clip-axis-label" text-anchor="middle" transform="rotate(-90 30 170)">surrogate L(ρ)</text>
+
+    <!-- X-axis tick labels -->
+    <g data-region="xticks"></g>
+  </svg>
+
+  <div class="clip-legend">
+    <span class="clip-legend-item"><span class="clip-dot clip-dot-unclipped"></span>unclipped ρ·A</span>
+    <span class="clip-legend-item"><span class="clip-dot clip-dot-clipped"></span>clip(ρ, 1−ε<sub>low</sub>, 1+ε<sub>high</sub>)·A</span>
+    <span class="clip-legend-item"><span class="clip-dot clip-dot-ppo"></span>min(·) — the PPO objective</span>
+  </div>
+
+  <figcaption>
+    The PPO objective is the <em>minimum</em> of the unclipped and clipped surrogates. When the
+    importance ratio drifts beyond the clip band on the side that would <em>improve</em> the
+    objective, the gradient flat-lines. Move ε to see the trust region widen and narrow. Flip
+    the advantage sign to see the clip activate on the opposite side.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+
+    document.querySelectorAll<HTMLElement>('.clip-figure').forEach((fig) => {
+      const svg = fig.querySelector<SVGSVGElement>('.clip-svg')!;
+      const gridG = fig.querySelector<SVGGElement>('[data-region="grid"]')!;
+      const xticksG = fig.querySelector<SVGGElement>('[data-region="xticks"]')!;
+      const bandRect = fig.querySelector<SVGRectElement>('[data-region="band"]')!;
+      const pathUnclipped = fig.querySelector<SVGPathElement>('[data-region="unclipped"]')!;
+      const pathClipped = fig.querySelector<SVGPathElement>('[data-region="clipped"]')!;
+      const pathPPO = fig.querySelector<SVGPathElement>('[data-region="ppo"]')!;
+      const epsInput = fig.querySelector<HTMLInputElement>('[data-control="epsilon"]')!;
+      const epsReadout = fig.querySelector<HTMLOutputElement>('[data-readout="epsilon"]')!;
+      const buttons = Array.from(fig.querySelectorAll<HTMLButtonElement>('.clip-toggle-btn'));
+
+      // Plot bounds: ρ ∈ [0.5, 1.5], surrogate ∈ [-1.5, 1.5]
+      const PX_MIN = 70, PX_MAX = 670; // plot x range
+      const PY_MIN = 30, PY_MAX = 310; // plot y range
+      const PLOT_W = PX_MAX - PX_MIN;
+      const PLOT_H = PY_MAX - PY_MIN;
+      const RHO_MIN = 0.5, RHO_MAX = 1.5;
+      const Y_MIN = -1.5, Y_MAX = 1.5;
+
+      function rhoToX(r: number) {
+        return PX_MIN + (r - RHO_MIN) / (RHO_MAX - RHO_MIN) * PLOT_W;
+      }
+      function yToPx(y: number) {
+        return PY_MIN + (Y_MAX - y) / (Y_MAX - Y_MIN) * PLOT_H;
+      }
+
+      let sign: 1 | -1 = 1;
+
+      function drawStatic() {
+        // Grid + x-ticks (drawn once)
+        gridG.replaceChildren();
+        xticksG.replaceChildren();
+        // Horizontal grid every 0.5
+        for (let y = -1.5; y <= 1.5; y += 0.5) {
+          const py = yToPx(y);
+          const l = document.createElementNS(NS, 'line');
+          l.setAttribute('x1', String(PX_MIN));
+          l.setAttribute('x2', String(PX_MAX));
+          l.setAttribute('y1', String(py));
+          l.setAttribute('y2', String(py));
+          l.setAttribute('class', y === 0 ? 'clip-grid-zero' : 'clip-grid-line');
+          gridG.appendChild(l);
+          if (Math.abs(y) > 0.01) {
+            const t = document.createElementNS(NS, 'text');
+            t.setAttribute('x', String(PX_MIN - 8));
+            t.setAttribute('y', String(py + 4));
+            t.setAttribute('class', 'clip-tick-label');
+            t.setAttribute('text-anchor', 'end');
+            t.textContent = y.toFixed(1);
+            gridG.appendChild(t);
+          }
+        }
+        // Vertical grid every 0.1 ρ
+        for (let r = 0.5; r <= 1.5 + 1e-9; r += 0.1) {
+          const px = rhoToX(r);
+          const l = document.createElementNS(NS, 'line');
+          l.setAttribute('x1', String(px));
+          l.setAttribute('x2', String(px));
+          l.setAttribute('y1', String(PY_MIN));
+          l.setAttribute('y2', String(PY_MAX));
+          l.setAttribute('class', Math.abs(r - 1) < 1e-9 ? 'clip-grid-rho1' : 'clip-grid-line');
+          gridG.appendChild(l);
+          if (Math.abs(r - Math.round(r * 10) / 10) < 1e-6) {
+            const t = document.createElementNS(NS, 'text');
+            t.setAttribute('x', String(px));
+            t.setAttribute('y', String(PY_MAX + 16));
+            t.setAttribute('class', 'clip-tick-label');
+            t.setAttribute('text-anchor', 'middle');
+            t.textContent = r.toFixed(1);
+            xticksG.appendChild(t);
+          }
+        }
+      }
+
+      function buildPath(fn: (rho: number) => number) {
+        let d = '';
+        const N = 200;
+        for (let i = 0; i <= N; i++) {
+          const rho = RHO_MIN + (RHO_MAX - RHO_MIN) * (i / N);
+          const y = fn(rho);
+          const px = rhoToX(rho);
+          const py = yToPx(y);
+          d += (i === 0 ? 'M ' : ' L ') + px.toFixed(2) + ' ' + py.toFixed(2);
+        }
+        return d;
+      }
+
+      function render() {
+        const eps = parseInt(epsInput.value, 10) / 100;
+        epsReadout.value = eps.toFixed(2);
+
+        const A = sign * 1.0; // |A| = 1 for visualization
+        const rhoLow = 1 - eps;
+        const rhoHigh = 1 + eps;
+
+        const xLow = rhoToX(rhoLow);
+        const xHigh = rhoToX(rhoHigh);
+        bandRect.setAttribute('x', String(xLow));
+        bandRect.setAttribute('y', String(PY_MIN));
+        bandRect.setAttribute('width', String(xHigh - xLow));
+        bandRect.setAttribute('height', String(PLOT_H));
+
+        // Unclipped: ρ × A
+        pathUnclipped.setAttribute('d', buildPath((rho) => rho * A));
+
+        // Clipped: clip(ρ, 1-ε, 1+ε) × A
+        pathClipped.setAttribute('d', buildPath((rho) => {
+          const r = Math.max(rhoLow, Math.min(rhoHigh, rho));
+          return r * A;
+        }));
+
+        // PPO objective: -L where L = -min(ρ×A, clip(ρ)×A) — we plot the surrogate value, so it's
+        // the min itself (positive). The PPO loss is the negative; we show what is maximized.
+        pathPPO.setAttribute('d', buildPath((rho) => {
+          const r = Math.max(rhoLow, Math.min(rhoHigh, rho));
+          return Math.min(rho * A, r * A);
+        }));
+      }
+
+      buttons.forEach((b) => {
+        b.addEventListener('click', () => {
+          buttons.forEach((bb) => {
+            const active = bb === b;
+            bb.classList.toggle('active', active);
+            bb.setAttribute('aria-pressed', String(active));
+          });
+          sign = (b.getAttribute('data-sign') === 'positive') ? 1 : -1;
+          render();
+        });
+      });
+      epsInput.addEventListener('input', render);
+
+      drawStatic();
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .clip-figure {
+    margin: 2.5rem 0;
+    max-width: 880px;
+  }
+
+  .clip-controls {
+    display: flex;
+    gap: 1.5rem;
+    align-items: end;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .clip-control,
+  .clip-slider {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex: 1 1 220px;
+  }
+  .clip-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    align-items: center;
+    column-gap: 0.6rem;
+    flex-direction: initial;
+  }
+  .clip-control-label {
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .clip-toggle {
+    display: flex;
+    gap: 0.3rem;
+  }
+  .clip-toggle-btn {
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    padding: 0.32rem 0.7rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 150ms ease;
+  }
+  .clip-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
+  .clip-toggle-btn.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .clip-slider input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .clip-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+  }
+
+  .clip-svg {
+    width: 100%;
+    height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .clip-frame {
+    fill: none;
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+  .clip-axis-label {
+    fill: var(--text-muted);
+    font-size: 11px;
+  }
+  .clip-tick-label {
+    fill: var(--text-faint);
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+
+  /* :global() — paths created via JS need explicit fills */
+  .clip-figure :global(.clip-grid-line) {
+    stroke: var(--border);
+    stroke-width: 0.5;
+    opacity: 0.5;
+  }
+  .clip-figure :global(.clip-grid-zero),
+  .clip-figure :global(.clip-grid-rho1) {
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    stroke-dasharray: 2 3;
+  }
+  .clip-figure :global(.clip-axis-zero) {
+    stroke: var(--text-muted);
+    stroke-width: 1;
+  }
+  .clip-figure :global(.clip-band) {
+    fill: var(--code-bg);
+    opacity: 0.6;
+  }
+  .clip-figure :global(.clip-curve) {
+    stroke-width: 2;
+    fill: none;
+  }
+  .clip-figure :global(.clip-curve-unclipped) {
+    stroke: var(--text-faint);
+    stroke-dasharray: 4 4;
+    opacity: 0.7;
+  }
+  .clip-figure :global(.clip-curve-clipped) {
+    stroke: #d08a3e;
+    opacity: 0.6;
+    stroke-dasharray: 6 3;
+  }
+  .clip-figure :global(.clip-curve-ppo) {
+    stroke: var(--accent);
+    stroke-width: 2.5;
+  }
+
+  .clip-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-top: 0.6rem;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+  .clip-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .clip-dot {
+    display: inline-block;
+    width: 18px;
+    height: 3px;
+    border-radius: 1px;
+  }
+  .clip-dot-unclipped { background: var(--text-faint); }
+  .clip-dot-clipped   { background: #d08a3e; }
+  .clip-dot-ppo       { background: var(--accent); }
+</style>
