@@ -3,7 +3,7 @@ title: "Training and inference engines have opposite goals — how RL frameworks
 description: "An LLM RL system runs two engines with opposite design pressures. Why they're separate codebases, how each works internally (PagedAttention, RadixAttention, FSDP, Megatron), and the adapter that moves weights between them — with VERL as the worked example."
 pubDate: 2026-05-27
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "vllm", "sglang", "fsdp", "megatron"]
+tags: ["llm-rl", "systems", "inference-engines", "training-backends", "resharding"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -12,6 +12,7 @@ import RadixAttention from '../../components/blog/verl/RadixAttention.astro';
 import FSDPAllGather from '../../components/blog/verl/FSDPAllGather.astro';
 import MegatronTP from '../../components/blog/verl/MegatronTP.astro';
 import BackendChoiceFlow from '../../components/blog/verl/BackendChoiceFlow.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 An LLM RL system has to run two fundamentally different engines: one optimized for *training* (sharded parameters, gradients, throughput) and one optimized for *inference* (paged KV cache, low-latency autoregressive decode). These pull in opposite directions — which is why, in every serious framework, they are separate codebases glued together by an adapter. This post opens both boxes: vLLM and SGLang for rollout, FSDP and Megatron-LM for training — what each does internally and *why* the design exists. We use [VERL](https://github.com/verl-project/verl) as the worked example, and its 3D-HybridEngine as the worked example of the bridge between the two.
 
@@ -209,6 +210,10 @@ VERL's backend story is: **train with the engine optimized for training; rollout
 The adapter is the unsung hero. Most of the engineering complexity in VERL is in the resharding logic — not because the rollout or training engines are simple individually, but because they're separately maintained external projects, and gluing them efficiently is hard. When you read VERL's `workers/sharding_manager/`, you're reading the code that makes the rest of the system work.
 
 The [next post in this series](/ashish-ai-blog/blog/llm-rl-scaling/) takes the backends as given and asks: at what scale does what bottleneck dominate, and what's the engineering response.
+
+<DesignPrinciple>
+When two subsystems face opposite design pressures, give them separate codebases and bridge them with an adapter. The training engine and the inference engine want opposite things; the resharding adapter between them is where the real engineering concentrates.
+</DesignPrinciple>
 
 ## References
 

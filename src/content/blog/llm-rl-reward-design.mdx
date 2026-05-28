@@ -3,7 +3,7 @@ title: "Reward design is the hard part of LLM RL"
 description: "Where the learning signal comes from, and why it's the most error-prone surface in an LLM RL system. Rule-based scoring, learned reward models, composition, the five reward-hacking patterns, and process rewards — with VERL as the worked example."
 pubDate: 2026-05-24
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "rlhf", "rewards", "prm"]
+tags: ["llm-rl", "systems", "reward-design", "rlhf"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -11,10 +11,11 @@ import RewardPipeline from '../../components/blog/verl/RewardPipeline.astro';
 import ORMvsPRM from '../../components/blog/verl/ORMvsPRM.astro';
 import RewardHackingGallery from '../../components/blog/verl/RewardHackingGallery.astro';
 import CompositeRewardSliders from '../../components/blog/verl/CompositeRewardSliders.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 The reward function is the most user-facing surface of an RL training run and the place where the most catastrophic mistakes get made. Get the algorithm wrong and training is slow; get the reward wrong and you spend a week training a model that has learned to game your verifier instead of solving the task.
 
-This post is the working reference for reward design in [VERL](https://github.com/verl-project/verl). We cover the rule-based pipeline, the model-based pipeline, how the two compose, how the KL term participates as a regularizing reward, the five named reward-hacking patterns and what they look like, and how to layer a process reward model on top of VERL's existing token-level infrastructure even though the framework doesn't ship a first-class PRM abstraction.<Sidenote id="sn-prereqs">Assumes you know what an RL training loop is and have seen rewards in classical RL (Sutton & Barto). No prior VERL experience required.</Sidenote>
+This post is the working reference for reward design in [VERL](https://github.com/verl-project/verl). We cover the rule-based pipeline, the model-based pipeline, how the two compose, how the KL term participates as a regularizing reward, the five named reward-hacking patterns and what they look like, and how to layer a process reward model on top of VERL's existing token-level infrastructure even though the framework doesn't ship a first-class PRM abstraction.<Sidenote id="sn-prereqs">Assumes you know what an RL training loop is and have seen rewards in classical RL (Sutton & Barto), plus light distributed-systems vocabulary (workers, sharding) for the scaling asides. No prior VERL experience required.</Sidenote>
 
 ## §1 — Why LLM rewards are hard
 
@@ -419,6 +420,10 @@ VERL's design pushes you toward a clean separation: write a `compute_score` func
 The cost is that the framework cannot save you from bad reward design. If your reward has a verifier loophole, no algorithm choice will fix it. If your RM has a stylistic bias, no training run will surface the bias unless you read the rollouts. The reward is the most powerful place to spend your design budget.
 
 The next post in this series goes deep on the multi-turn machinery — the rollout side of the loop, where the responses your reward function will score are actually produced.
+
+<DesignPrinciple>
+Treat the reward as a specification with bugs. It is the highest-leverage and highest-risk surface in the system; a framework can make it easy to write but cannot make it correct. The only reliable check is reading the rollouts.
+</DesignPrinciple>
 
 ## References
 

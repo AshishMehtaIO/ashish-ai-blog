@@ -3,7 +3,7 @@ title: "How an LLM RL system fits together"
 description: "LLM RL is a distributed-systems problem before it's an algorithms problem. A top-down tour of the moving parts — single-controller orchestration, the unifying advantage estimator, multi-turn agent loops — with VERL as the worked example."
 pubDate: 2026-05-22
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "rlhf"]
+tags: ["llm-rl", "systems", "orchestration", "rlhf"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -18,6 +18,7 @@ import AlgorithmMatrix from '../../components/blog/verl/AlgorithmMatrix.astro';
 import IterationWalkthrough from '../../components/blog/verl/IterationWalkthrough.astro';
 import MultiTurnRolloutScrubber from '../../components/blog/verl/MultiTurnRolloutScrubber.astro';
 import AsyncRolloutGantt from '../../components/blog/verl/AsyncRolloutGantt.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 Reinforcement learning on large language models is a distributed-systems problem before it is an algorithms problem. A framework has to coordinate a training engine, an inference engine, several model copies, and a reward signal — all cycling every iteration, all competing for the same GPUs. There is a small design space of answers to *how*, and this post walks it top-down. We use [VERL](https://github.com/verl-project/verl) — the reference implementation of [HybridFlow](https://arxiv.org/abs/2409.19256) — as the worked example throughout, because it makes most of the canonical design choices and makes them legibly.
 
@@ -363,3 +364,7 @@ Honest list, with no editorializing.
 VERL is a **single-controller orchestrator** over **multi-controller worker groups**, with pluggable training and rollout backends and a unified data protocol (`DataProto`) flowing between them. The training loop — rollout, reward, advantage, update — lives in one driver class (`RayPPOTrainer`). The algorithm choice (PPO, GRPO, RLOO, REINFORCE++, DAPO) is one config key selecting an advantage estimator; everything else is the same machinery. Reward functions are user-supplied Python with a clean composition pipeline; the framework is ORM-first today, with PRM as an extension surface rather than a built-in. Multi-turn agent rollouts are first-class via `AgentLoop`, with a `response_mask` trick that keeps the loss machinery simple. Recent additions — DAPO as a recipe, async rollout, SGLang — are best read as evidence the abstractions are holding their shape under real demands.
 
 The next posts in this series will go deep on the pieces that deserve their own essay: the algorithm zoo, the multi-turn / agentic stack, and what scaling really looks like. For now, you have enough of a mental model to open the repo and start reading.
+
+<DesignPrinciple>
+Separate the control plane from the compute plane. One driver process should orchestrate the *what*; specialized worker groups should own the *how*. That split is what lets a single, readable trainer file express a wildly heterogeneous distributed computation.
+</DesignPrinciple>

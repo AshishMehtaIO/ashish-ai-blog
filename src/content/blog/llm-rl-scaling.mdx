@@ -3,7 +3,7 @@ title: "Where LLM RL bottlenecks move as you scale"
 description: "The scaling story for LLM RL: how the bottleneck migrates from compute to memory to communication as model size grows, parameter resharding internals, one-step-off vs fully async, and what changes at 70B+. VERL as the worked example."
 pubDate: 2026-05-28
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "scaling", "async", "performance"]
+tags: ["llm-rl", "systems", "scaling", "async-rollout", "resharding"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -12,6 +12,7 @@ import AsyncStaleness from '../../components/blog/verl/AsyncStaleness.astro';
 import NCCLPrimitives from '../../components/blog/verl/NCCLPrimitives.astro';
 import MemoryBudget from '../../components/blog/verl/MemoryBudget.astro';
 import CriticalPath from '../../components/blog/verl/CriticalPath.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 The [HybridFlow paper](https://arxiv.org/abs/2409.19256) reports 1.53× to 20.57× throughput improvements over comparable systems. That's a 13× range. This post is about *why* the range is so wide — what changes between the workload that gets 1.5× and the one that gets 20×. Spoiler: it's about which phase dominates, how often weights have to move, and whether you can hide compute behind I/O.
 
@@ -208,6 +209,10 @@ VERL gives you the tools to apply each response: FSDP and Megatron for training 
 Most setups don't need to think this hard. Below 70B, the defaults work. At 70B+, you start needing to read the profiler. At 405B+, you're solving a different problem — one of distributed systems engineering as much as RL.
 
 The [next and final post in this series](/ashish-ai-blog/blog/llm-rl-observability/) covers the operational side: what to log during training, how to recognize failure modes from their fingerprints on metrics dashboards, and how to debug a training run that's underperforming.
+
+<DesignPrinciple>
+Performance work is critical-path work. Find the longest sequential segment of an iteration, shorten it, and repeat — knowing the bottleneck migrates from compute to memory to communication as you scale.
+</DesignPrinciple>
 
 ## References
 

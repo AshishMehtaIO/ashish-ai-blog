@@ -3,7 +3,7 @@ title: "Why LLM RL frameworks don't ship an environment class"
 description: "Plugging environments and tools into an LLM RL system — and why the right abstraction is a function, not a Gym-style Env. Sandboxed code execution, search, retrieval, tool-level rewards, with VERL as the worked example."
 pubDate: 2026-05-26
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "tools", "agents", "environments"]
+tags: ["llm-rl", "systems", "environments", "tools", "agent-loops"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -11,8 +11,9 @@ import ToolAnatomy from '../../components/blog/verl/ToolAnatomy.astro';
 import SandboxArchitecture from '../../components/blog/verl/SandboxArchitecture.astro';
 import ReActVsFunctionCalling from '../../components/blog/verl/ReActVsFunctionCalling.astro';
 import ToolLatencyVsReward from '../../components/blog/verl/ToolLatencyVsReward.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
-Classical RL has a clean environment interface — `reset()`, `step()`, `done` — and a generation of practitioners learned to expect it. LLM RL frameworks mostly *don't* provide one, and that absence is a deliberate design decision worth understanding. This post is about how you actually plug environments and tools into an LLM RL system — code-execution sandboxes, search APIs, browsers, retrieval — and why the right abstraction turns out to be a function, not a Gym-style `Env`. We use [VERL](https://github.com/verl-project/verl) as the worked example (its tool interface is, pointedly, a decorated Python function); the rollout/agent-loop machinery itself is covered in [the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/).
+Classical RL has a clean environment interface — `reset()`, `step()`, `done` — and a generation of practitioners learned to expect it. LLM RL frameworks mostly *don't* provide one, and that absence is a deliberate design decision worth understanding. This post is about how you actually plug environments and tools into an LLM RL system — code-execution sandboxes, search APIs, browsers, retrieval — and why the right abstraction turns out to be a function, not a Gym-style `Env`. We use [VERL](https://github.com/verl-project/verl) as the worked example (its tool interface is, pointedly, a decorated Python function); the rollout/agent-loop machinery itself is covered in [the multi-turn post](/ashish-ai-blog/blog/llm-rl-multi-turn/).<Sidenote id="sn-prereqs">Assumes you've seen RLHF/PPO and have light distributed-systems vocabulary (async I/O, sandboxing). No prior VERL experience required.</Sidenote>
 
 ## §1 — Why VERL has no formal Env class
 
@@ -298,6 +299,10 @@ This works because the framework doesn't pretend to be a general-purpose RL fram
 The cost is that there's no shared abstraction for "an environment with reset semantics and well-defined episodes." If you need that, you build it yourself, inside a tool, with per-instance state. The benefit is that the surface area you have to learn is small: one decorator, one base class, four methods.
 
 The [next post in this series](/ashish-ai-blog/blog/llm-rl-engines/) opens the box on the backends — vLLM, SGLang, FSDP, Megatron — that make all of this run efficiently at scale.
+
+<DesignPrinciple>
+Don't build an abstraction the domain doesn't need. LLM "environments" are computational — APIs, sandboxes, retrievers — and the right interface for an API is a function, not a Gym-style `Env` class.
+</DesignPrinciple>
 
 ## References
 

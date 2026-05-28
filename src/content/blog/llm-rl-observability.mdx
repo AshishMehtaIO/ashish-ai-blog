@@ -3,7 +3,7 @@ title: "Operating an LLM RL training run"
 description: "The operational side of LLM RL: what to log, what healthy training looks like, the five failure modes and their metric fingerprints, train-vs-prod rollout drift, and a debugging playbook. VERL as the worked example."
 pubDate: 2026-05-28
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "debugging", "observability", "evaluation"]
+tags: ["llm-rl", "systems", "observability", "evaluation", "debugging"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -11,10 +11,11 @@ import FailureFingerprints from '../../components/blog/verl/FailureFingerprints.
 import KLOverTraining from '../../components/blog/verl/KLOverTraining.astro';
 import TrainVsProdDiff from '../../components/blog/verl/TrainVsProdDiff.astro';
 import LoggingDashboard from '../../components/blog/verl/LoggingDashboard.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 LLM RL training is a long-feedback-loop activity full of silent failures. A run that looks healthy at step 100 can be subtly broken in ways you only notice at step 5000 when reward plateaus. This post is the operational reference: what to log, what healthy training looks like in those logs, the five named failure modes with their metric fingerprints, the train-vs-prod rollout discrepancies that silently destroy serving performance, and a concrete debugging playbook.
 
-The final post in this series.<Sidenote id="sn-prereqs">Assumes basic familiarity with [VERL](https://github.com/verl-project/verl) and the RL training loop. The fingerprints here generalize to any LLM RL framework but the specific metrics map directly to VERL\'s W&amp;B / TensorBoard integration.</Sidenote>
+The final post in this series.<Sidenote id="sn-prereqs">Assumes basic familiarity with the RL training loop and light distributed-systems vocabulary (ranks, NCCL). The fingerprints here generalize to any LLM RL framework but the specific metrics map directly to VERL\'s W&amp;B / TensorBoard integration.</Sidenote>
 
 ## §1 — The canonical metric set
 
@@ -211,6 +212,10 @@ The second most valuable practice: **diff against last good run.** Most failures
 The third: **trust the fingerprints.** The five failure modes recur. Once you've seen each one, you spot it faster the next time. Tier-1 failures — KL explosion, mode collapse, reward hacking, gradient instability, train-vs-prod drift — cover ~80% of all training problems you'll encounter in VERL.
 
 This is the last post in the series. Across eight posts, we've covered the mental model of VERL, the algorithm zoo, reward design, multi-turn agents, environments and tools, the backend internals, scaling and async, and operations. The framework is genuinely well-designed; the abstractions are durable; the engineering complexity is in the places where it has to be. The path from "I want to do LLM RL" to "I am running a training job that works" is shorter than it used to be — but it still rewards taking the time to understand the moving parts.
+
+<DesignPrinciple>
+Long-feedback-loop systems are debugged by fingerprint, not by dashboard. Name the failure modes so you can recognize each one by the shape it makes on a handful of standard metrics.
+</DesignPrinciple>
 
 ## References
 

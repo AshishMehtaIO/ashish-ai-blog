@@ -3,7 +3,7 @@ title: "The algorithm interface: PPO, GRPO, and DAPO as one function"
 description: "Five RL algorithms — PPO, GRPO, RLOO, REINFORCE++, DAPO — are specializations of a single interface: the advantage estimator. How the design space collapses to one function, shown through VERL."
 pubDate: 2026-05-23
 author: "Ashish Mehta"
-tags: ["verl", "rl", "llm", "rlhf", "ppo", "grpo", "dapo"]
+tags: ["llm-rl", "systems", "advantage-estimation", "ppo", "grpo", "dapo"]
 ---
 
 import Sidenote from '../../components/Sidenote.astro';
@@ -14,10 +14,11 @@ import KLPlacement from '../../components/blog/verl/KLPlacement.astro';
 import ISRatioExplorer from '../../components/blog/verl/ISRatioExplorer.astro';
 import AlgorithmDecisionTree from '../../components/blog/verl/AlgorithmDecisionTree.astro';
 import AlgorithmMatrix from '../../components/blog/verl/AlgorithmMatrix.astro';
+import DesignPrinciple from '../../components/DesignPrinciple.astro';
 
 An LLM RL framework has to support a zoo of algorithms — PPO, GRPO, RLOO, REINFORCE++, DAPO — without forking the trainer for each one. There is a clean systems answer: the algorithms differ in *one place*, the advantage estimator, and share everything else. This post earns that claim with the math, walking each algorithm, naming what it adds and drops, and ending with a decision tree. We use [VERL](https://github.com/verl-project/verl) as the worked example — there, the algorithm is a single config key that selects one function.
 
-A claim the intro post in this series made: **the algorithms differ in *one place*, and the rest of VERL's machinery is unchanged.** That is the design's most elegant property and the reason adding a new algorithm — DAPO is the canonical example — is mostly a config recipe rather than a fork.<Sidenote id="sn-intro-recap">If you read the [intro post](/ashish-ai-blog/blog/llm-rl-systems-overview/), this is the §5 expansion. If you didn't, you don't need to — this post is self-contained. It assumes you know classical RL at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) level and have seen PPO at least once.</Sidenote>
+A claim the intro post in this series made: **the algorithms differ in *one place*, and the rest of VERL's machinery is unchanged.** That is the design's most elegant property and the reason adding a new algorithm — DAPO is the canonical example — is mostly a config recipe rather than a fork.<Sidenote id="sn-intro-recap">If you read the [intro post](/ashish-ai-blog/blog/llm-rl-systems-overview/), this is the §5 expansion. If you didn't, you don't need to — this post is self-contained. It assumes you know classical RL at the [Sutton &amp; Barto](http://incompleteideas.net/book/the-book.html) level, have seen PPO at least once, and have light distributed-systems vocabulary (workers, sharding).</Sidenote>
 
 We will earn that claim with the math. By the end you should be able to: read VERL's [`core_algos.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py) without surprises; choose an algorithm for a given workload; and reason about which hyperparameters to touch when training misbehaves.
 
@@ -408,6 +409,10 @@ The five algorithms above span a real design space. PPO is the most general but 
 When you read a new VERL config, look at `algorithm.adv_estimator` first — that tells you which advantage shape you're in. Then check `algorithm.use_kl_in_reward` and `algorithm.kl_loss_coef` — that tells you where KL lives. Then `actor.cliprange*` and `actor.loss_agg_mode` — those tell you whether DAPO-style tweaks are on. Everything else is rollout shape, batch sizes, and optimizer hyperparams.
 
 That's the algorithm zoo. The next post in this series goes deep on the other half of the picture: where the rewards themselves come from, including the part we glossed over — building a process reward model on top of VERL when the framework doesn't ship one.
+
+<DesignPrinciple>
+Find the smallest interface where variants genuinely differ, and make everything else shared. For LLM RL algorithms that interface is the advantage estimator — one function. The payoff: a new algorithm becomes a config change, not a fork.
+</DesignPrinciple>
 
 ## References
 
