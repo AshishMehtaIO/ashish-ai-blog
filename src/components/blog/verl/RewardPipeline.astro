@@ -1,0 +1,180 @@
+---
+// Viz — Reward composition pipeline. Shows the stages: rule + RM → combine →
+// + KL → token_level_scores. Click each stage to see what flows.
+---
+
+<figure class="rp-figure" aria-label="Reward composition pipeline">
+  <svg viewBox="0 0 720 320" class="rp-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <defs>
+      <marker id="rp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" />
+      </marker>
+    </defs>
+
+    <!-- Source: response -->
+    <g class="rp-node rp-stage" data-stage="response" transform="translate(20 130)">
+      <rect width="100" height="60" rx="6" class="rp-rect rp-rect-prep" />
+      <text x="50" y="28" class="rp-label" text-anchor="middle">response</text>
+      <text x="50" y="44" class="rp-sub" text-anchor="middle">y ~ π_θ</text>
+    </g>
+
+    <!-- Rule-based -->
+    <g class="rp-node rp-stage" data-stage="rule" transform="translate(180 50)">
+      <rect width="140" height="60" rx="6" class="rp-rect rp-rect-prep" />
+      <text x="70" y="28" class="rp-label" text-anchor="middle">rule reward</text>
+      <text x="70" y="44" class="rp-sub" text-anchor="middle">compute_score()</text>
+    </g>
+
+    <!-- Model-based -->
+    <g class="rp-node rp-stage" data-stage="rm" transform="translate(180 210)">
+      <rect width="140" height="60" rx="6" class="rp-rect rp-rect-prep" />
+      <text x="70" y="28" class="rp-label" text-anchor="middle">RM reward</text>
+      <text x="70" y="44" class="rp-sub" text-anchor="middle">disc / generative</text>
+    </g>
+
+    <!-- Combine -->
+    <g class="rp-node rp-stage" data-stage="combine" transform="translate(380 130)">
+      <rect width="100" height="60" rx="6" class="rp-rect rp-rect-prep" />
+      <text x="50" y="28" class="rp-label" text-anchor="middle">combine</text>
+      <text x="50" y="44" class="rp-sub" text-anchor="middle">weighted sum</text>
+    </g>
+
+    <!-- KL adjustment -->
+    <g class="rp-node rp-stage" data-stage="kl" transform="translate(540 130)">
+      <rect width="160" height="60" rx="6" class="rp-rect rp-rect-prep" />
+      <text x="80" y="28" class="rp-label" text-anchor="middle">− β · KL</text>
+      <text x="80" y="44" class="rp-sub" text-anchor="middle">if use_kl_in_reward</text>
+    </g>
+
+    <!-- Final: token-level scores - below -->
+    <g class="rp-node rp-stage" data-stage="final" transform="translate(280 270)">
+      <rect width="200" height="40" rx="6" class="rp-rect rp-rect-train" />
+      <text x="100" y="20" class="rp-label" text-anchor="middle">token_level_scores</text>
+      <text x="100" y="34" class="rp-sub" text-anchor="middle">(batch, T_resp) → advantage</text>
+    </g>
+
+    <!-- Edges -->
+    <g class="rp-edges">
+      <path d="M 120 145 L 180 80" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+      <path d="M 120 175 L 180 240" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+      <path d="M 320 80 L 380 145" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+      <path d="M 320 240 L 380 175" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+      <path d="M 480 160 L 540 160" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+      <path d="M 620 190 L 480 270" class="rp-edge" marker-end="url(#rp-arrow)" fill="none" />
+    </g>
+  </svg>
+
+  <div class="rp-detail" data-region="detail">
+    <h5 data-readout="title">Click any stage to inspect</h5>
+    <p data-readout="desc">Each stage transforms or contributes to the reward signal. Hover or click to see what.</p>
+  </div>
+
+  <figcaption>
+    The reward signal is a pipeline. Rule-based and model-based scores fan in, combine, optionally
+    get adjusted by token-level KL against the reference policy, and land in <code>token_level_scores</code>
+    where the advantage estimator picks them up.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const DETAILS: Record<string, { title: string; desc: string }> = {
+      response: {
+        title: 'Response y from the rollout',
+        desc: 'The policy generates a response token-by-token. The full string (and the tokenizer\'s encoding of it) is the input to every downstream reward stage.',
+      },
+      rule: {
+        title: 'Rule-based reward — compute_score()',
+        desc: 'Your Python function. Signature: (data_source, solution_str, ground_truth, extra_info) → {score: float}. Examples: math correctness via regex match, code passing tests, format check. Async; runs in parallel across the batch.',
+      },
+      rm: {
+        title: 'Model-based reward — RewardModel worker',
+        desc: 'A learned reward model. Discriminative (single scalar from a value head) or generative (LLM-as-judge with a critique + score). Routed via HTTP so the RM can scale independently of the trainer.',
+      },
+      combine: {
+        title: 'Combine — weighted sum',
+        desc: 'Both signals contribute additively, typically with configurable weights. Result is a single scalar per response. Custom reward managers can implement gates or multiplicative combinations instead.',
+      },
+      kl: {
+        title: 'KL adjustment — per-token regularization',
+        desc: 'If algorithm.use_kl_in_reward is true, the per-token KL between policy and reference is subtracted at each position. This regularizes the policy toward the SFT starting point. Skipped entirely when KL is in the loss instead.',
+      },
+      final: {
+        title: 'token_level_scores — the signal',
+        desc: 'A tensor of shape (batch, T_resp). For ORM, only the last response token is non-zero (plus the per-token KL adjustment if enabled). For PRM, multiple positions can carry reward. The advantage estimator consumes this.',
+      },
+    };
+
+    document.querySelectorAll<HTMLElement>('.rp-figure').forEach((fig) => {
+      const stages = Array.from(fig.querySelectorAll<SVGGElement>('.rp-stage'));
+      const titleEl = fig.querySelector<HTMLElement>('[data-readout="title"]')!;
+      const descEl = fig.querySelector<HTMLElement>('[data-readout="desc"]')!;
+
+      function highlight(id: string) {
+        stages.forEach((s) => s.classList.toggle('is-active', s.getAttribute('data-stage') === id));
+        const d = DETAILS[id];
+        if (d) {
+          titleEl.textContent = d.title;
+          descEl.textContent = d.desc;
+        }
+      }
+
+      stages.forEach((s) => {
+        s.addEventListener('click', () => highlight(s.getAttribute('data-stage') || ''));
+        s.addEventListener('mouseenter', () => highlight(s.getAttribute('data-stage') || ''));
+      });
+    });
+  })();
+</script>
+
+<style>
+  .rp-figure { margin: 2.5rem 0; max-width: 880px; }
+  .rp-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+  }
+  .rp-node { cursor: pointer; }
+  .rp-rect {
+    stroke-width: 1.4;
+    transition: all 200ms ease;
+  }
+  .rp-rect-prep { fill: #dde5f3; stroke: #4a78c2; }
+  .rp-rect-train { fill: #e3d9f3; stroke: #6b4ab8; }
+  .rp-node:hover .rp-rect,
+  .rp-node.is-active .rp-rect {
+    stroke-width: 2.5;
+    stroke: var(--accent);
+  }
+  .rp-label { fill: var(--text); font-size: 13px; font-weight: 600; font-family: var(--font-serif); }
+  .rp-sub { fill: var(--text-muted); font-size: 10.5px; }
+  .rp-edge {
+    stroke: var(--text-muted);
+    stroke-width: 1.3;
+    opacity: 0.7;
+  }
+  #rp-arrow path { fill: var(--text-muted); }
+
+  .rp-detail {
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .rp-detail h5 {
+    margin: 0 0 0.35rem;
+    font-family: var(--font-serif);
+    font-size: 1rem;
+    color: var(--text);
+  }
+  .rp-detail p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+</style>

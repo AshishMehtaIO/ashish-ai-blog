@@ -1,0 +1,430 @@
+---
+title: "Reward functions in VERL: rule, model, composite, and PRM"
+description: "Where the learning signal comes from. Rule-based scoring, learned reward models, composite shaping, the five named reward-hacking patterns, and how to layer a PRM on top of VERL when the framework doesn't ship one."
+pubDate: 2026-06-05
+author: "Ashish"
+tags: ["verl", "rl", "llm", "rlhf", "rewards", "prm"]
+---
+
+import Sidenote from '../../components/Sidenote.astro';
+import RewardPipeline from '../../components/blog/verl/RewardPipeline.astro';
+import ORMvsPRM from '../../components/blog/verl/ORMvsPRM.astro';
+import RewardHackingGallery from '../../components/blog/verl/RewardHackingGallery.astro';
+import CompositeRewardSliders from '../../components/blog/verl/CompositeRewardSliders.astro';
+
+The reward function is the most user-facing surface of an RL training run and the place where the most catastrophic mistakes get made. Get the algorithm wrong and training is slow; get the reward wrong and you spend a week training a model that has learned to game your verifier instead of solving the task.
+
+This post is the working reference for reward design in [VERL](https://github.com/verl-project/verl). We cover the rule-based pipeline, the model-based pipeline, how the two compose, how the KL term participates as a regularizing reward, the five named reward-hacking patterns and what they look like, and how to layer a process reward model on top of VERL's existing token-level infrastructure even though the framework doesn't ship a first-class PRM abstraction.<Sidenote id="sn-prereqs">Assumes you know what an RL training loop is and have seen rewards in classical RL (Sutton & Barto). No prior VERL experience required.</Sidenote>
+
+## §1 — Why LLM rewards are hard
+
+In classical RL, rewards come from the environment — the game emits a score, the simulator returns a value, the dynamics impose a cost. The rewards are *given*. In LLM RL, you have to *write* the reward function. There is no environment. The reward is your Python code (a verifier, a parser, a classifier) or another model (a learned reward model) — and the policy learns to maximize whatever you wrote, including all the bugs.
+
+Three properties of LLM rewards make them especially fragile:
+
+**The action space is huge.** Each token is a choice from a 100k+ vocabulary. The policy will find sequences you did not anticipate. If your rule-based verifier accepts the answer `"42"` but not `"42.0"` or `"forty-two"`, the policy will learn to produce specifically `"42"`. If your verifier accepts an answer hidden inside a sentence, the policy will learn to hide answers inside sentences.
+
+**The reward is almost always sparse.** Most LLM RL tasks have one terminal scalar reward per response — "right" or "wrong" on the final answer. The policy has to credit-assign that single signal across thousands of tokens. This is the algorithm's job (see [the algorithm zoo post](/ashish-ai-blog/blog/verl-algorithm-zoo/)) but it amplifies any noise or bias in the reward itself.
+
+**The reference policy matters.** Unlike Atari or MuJoCo, the starting policy is already a competent language model. We do not want to deviate so far that we lose that competence. The KL penalty against the SFT reference is part of the reward signal in most LLM RL setups, and the choice of how much to weigh it is one of the most sensitive knobs in training.
+
+The rest of this post is about how VERL packages these concerns into a clean interface and what the practitioner has to bring to that interface.
+
+## §2 — The composition pipeline
+
+Every reward signal in VERL ends up in one tensor: `token_level_scores`, shape `(batch, response_length)`. This is what the advantage estimator sees. Several sources feed into it.
+
+<RewardPipeline />
+
+The stages, in order:
+
+1. **Rule-based scoring.** A Python function you write takes `(data_source, solution_str, ground_truth, extra_info)` and returns a dict with a `score` (and optional extras). VERL's [`RewardManager`](https://github.com/verl-project/verl/tree/main/verl/workers/reward_manager) handles batching, async dispatch, and timeout enforcement.
+
+2. **Model-based scoring.** A learned reward model — either a classifier-head architecture (discriminative) or an LLM-as-judge (generative) — scores the response. VERL routes RM calls through an HTTP server so the RM can scale independently of the trainer.
+
+3. **Aggregation.** The two scores combine — typically additively, with a weight on each — into a per-response scalar. This becomes the value at the last response token in `token_level_scores`; all earlier tokens get zero.
+
+4. **KL adjustment** (optional, if `algorithm.use_kl_in_reward: true`). The per-token KL between policy and reference is subtracted from `token_level_scores`. Now non-terminal tokens have non-zero rewards.
+
+5. **Hand-off to advantage.** The advantage estimator (GAE / GRPO / etc.) consumes `token_level_scores` and produces `advantages`. From there everything is identical across algorithms.
+
+Two practical consequences of this design:
+
+- **Composition is additive.** Your rule-based reward and the reward model contribute a scalar each; the framework adds them. You can do hierarchical / gated combinations inside your `compute_score` function — but the framework's job is just plumbing.
+
+- **The placement is opinionated.** VERL places the response-level reward at the *last response token*. This is the ORM convention. If you want per-step rewards (PRM), you have to populate `token_level_scores` at the right positions yourself — the framework's plumbing supports this but does not do it for you.
+
+## §3 — Rule-based rewards: the signature
+
+The canonical signature:
+
+```python
+async def compute_score(
+    data_source: str,           # e.g. "openai/gsm8k"
+    solution_str: str,           # the full response generated by the policy
+    ground_truth: str,           # from the dataset row
+    extra_info: dict | None,    # anything else you stashed in the row
+) -> dict:
+    """Returns {"score": float, "extra_info": {...}}."""
+```
+
+You point VERL at your function via `custom_reward_function.path = your_module:compute_score`. The framework calls it once per response, asynchronously, with a configurable timeout. It expects a scalar in `[0, 1]` (or whatever range your algorithm tolerates).
+
+### Worked example: GSM8K verifier
+
+```python
+import re
+
+# Match the final answer in #### marker (GSM8K convention)
+ANSWER_RE = re.compile(r"####\s*([-+]?\d+(?:\.\d+)?)")
+
+async def compute_score(data_source, solution_str, ground_truth, extra_info):
+    # Extract the model's answer
+    match = ANSWER_RE.search(solution_str)
+    if not match:
+        return {"score": 0.0, "extra_info": {"reason": "no_answer_marker"}}
+    try:
+        model_answer = float(match.group(1))
+    except ValueError:
+        return {"score": 0.0, "extra_info": {"reason": "unparseable"}}
+
+    # Extract the ground truth (already a number in the dataset)
+    try:
+        true_answer = float(ground_truth)
+    except ValueError:
+        return {"score": 0.0, "extra_info": {"reason": "bad_gt"}}
+
+    # Score: 1.0 if exact match, 0.0 otherwise
+    return {
+        "score": float(abs(model_answer - true_answer) < 1e-3),
+        "extra_info": {
+            "model_answer": model_answer,
+            "true_answer": true_answer,
+        },
+    }
+```
+
+A few notes from this example that generalize:
+
+- **Be strict about format.** Requiring `####` as a marker forces the model to learn the convention. The reward shapes the format whether you want it to or not.
+- **Return a `score` in `[0, 1]`** unless you specifically want a different range. The downstream algorithm's hyperparameters assume some scale; mixing scales requires re-tuning everything.
+- **Use `extra_info` for diagnostics.** It surfaces in W&B logs, which is the only way you find out *why* your reward was low at 3 a.m.
+- **Reject malformed responses with 0, not -1.** Negative rewards bias the gradient toward "produce nothing" rather than "produce correctly." If you want to penalize specific failure modes, use composite rewards (§4).
+
+### Worked example: code execution
+
+A more involved case: a code agent whose responses are Python programs, scored by running them against a test suite.
+
+```python
+import subprocess
+import json
+
+async def compute_score(data_source, solution_str, ground_truth, extra_info):
+    # solution_str is a Python program; ground_truth is JSON test cases
+    tests = json.loads(ground_truth)
+    passed = 0
+    for test in tests:
+        try:
+            result = subprocess.run(
+                ["python", "-c", solution_str + "\n" + test["check"]],
+                capture_output=True,
+                timeout=5,
+                text=True,
+            )
+            if result.returncode == 0 and "PASS" in result.stdout:
+                passed += 1
+        except subprocess.TimeoutExpired:
+            pass
+    return {"score": passed / len(tests), "extra_info": {"passed": passed, "total": len(tests)}}
+```
+
+Two things to internalize:
+
+- **Sandboxing matters.** Don't run model-generated code inside your training loop without isolation. Use Docker, Firejail, gVisor, or a microVM. We cover the options in the [environments and tools post](/ashish-ai-blog/blog/verl-environments-tools/).
+- **Latency matters.** If the reward function takes 5 seconds per response and you're scoring 256 responses per iteration, you've added 20+ minutes of wall time per training step. Parallelize, cap timeouts aggressively, or move the heavy work into a separate service.
+
+## §4 — Composing rewards
+
+Real-world reward functions are rarely single signals. The conventional decomposition is something like:
+
+$$
+R(x, y) = w_{\text{correct}} \cdot \mathbb{1}[\text{correct}(y)] + w_{\text{format}} \cdot f_{\text{format}}(y) + w_{\text{length}} \cdot g_{\text{length}}(y)
+$$
+
+The weights $w_{\bullet}$ are the most powerful (and the most overlooked) hyperparameters in your run.
+
+<CompositeRewardSliders />
+
+Three patterns, with tradeoffs:
+
+**Pattern 1: pure weighted sum.** Each term contributes independently. The risk is that the policy maximizes the cheapest term to maximize — usually format — at the expense of correctness. If format is 0.1 and correctness is 0.9, and the policy can hit format 100% of the time but correctness only 20%, the gradient prefers a format-perfect wrong answer (0.1) to a malformed correct answer (0.18). Wait, that's the wrong direction — let me redo. If correctness is 1.0 with weight 0.9, that's 0.9; format-perfect (1.0 × 0.1 = 0.1) only beats malformed-correct if the model also gets format. Point is: the *gradient* tells the policy what to do, and the gradient is shaped by the local sensitivity of the reward to each component. Cheap-to-improve components dominate.
+
+**Pattern 2: hierarchical gates.** Correctness is the primary reward; format is a *gate* — you only get the correctness reward if format passes:
+
+```python
+score = 0.0
+if format_ok(solution_str):
+    if is_correct(solution_str, ground_truth):
+        score = 1.0
+    # else 0
+# else 0 regardless of correctness
+```
+
+This prevents the format-without-correctness failure mode. The price is steeper gradient — no partial credit. Most production setups use a soft version: small format bonus, large correctness reward, multiplicative interaction.
+
+**Pattern 3: multiplicative.** Reward is the product of component scores:
+
+$$
+R(x, y) = f_{\text{format}}(y) \cdot \mathbb{1}[\text{correct}(y)]
+$$
+
+Zero on any component zeros the reward. Robust but high-variance — most batches contain mostly zeros.
+
+### Length penalties: the universal trap
+
+Adding a length penalty to discourage rambling is one of the most common reward additions. It almost always causes problems:
+
+- Too strong → the policy clips responses at 50 tokens, refusing to elaborate on multi-step problems.
+- Too weak → no effect.
+- Misshaped → the policy learns to encode information densely in opaque ways.
+
+DAPO's [paper](https://arxiv.org/abs/2503.14476) proposes an *overlong reward shape*: zero penalty up to a soft length cap, then a linear penalty between the soft cap and the hard context limit. This avoids the cliff while still discouraging unbounded generation. The recipe is implemented as a custom reward function — the framework doesn't bake it in.
+
+## §5 — Model-based rewards
+
+When your task does not have a programmatic verifier, you need a learned reward model.
+
+### Discriminative reward models
+
+A classifier head over a transformer backbone. The output is a single scalar: $R_\phi(x, y) \in \mathbb{R}$. Trained on preference data (Bradley-Terry on human comparisons), or on calibrated scalar scores if you have them.
+
+VERL exposes this via the `RewardModel` worker. You configure:
+
+```yaml
+reward_model:
+  enable: true
+  model:
+    path: <path-to-RM-checkpoint>
+    tokenizer_path: <usually the same>
+  micro_batch_size_per_gpu: 8
+```
+
+The RM worker shares GPUs with the rest of the cluster (or runs on its own pool — see the [scaling post](/ashish-ai-blog/blog/verl-scaling-async/)). During training, every batch of responses gets a forward pass through the RM, and the resulting scalar is added to `token_level_scores`.
+
+### Generative reward models (LLM-as-judge)
+
+An LLM that produces a critique and a score, given the original prompt and the response. Variants:
+
+- *Pointwise*: judge sees one response and produces a score.
+- *Pairwise*: judge sees two responses and produces a preference.
+- *Chain-of-thought judge*: judge reasons before scoring.
+
+Generative RMs are stronger on complex tasks (the judge can think about the response) but slower and more expensive. For instruction-following and helpfulness, they often beat discriminative RMs.
+
+VERL routes generative RMs through the same HTTP-server pattern. The judge LLM is hosted by vLLM or SGLang on dedicated GPUs and called over HTTP from the reward manager.
+
+### Reward model architecture variants
+
+Worth knowing about:
+
+- **Value-head RMs:** a single value head on top of the backbone — the conventional discriminative architecture.
+- **Sequence-level RMs:** score the full response holistically.
+- **Token-level RMs:** score every token (rare, expensive, but useful for PRMs).
+- **Calibrated RMs:** trained to output a probability of being "good" rather than an arbitrary scalar — easier to compose.
+
+### Reward model failure modes
+
+The reward model is itself a model and has its own pathologies. Some signatures:
+
+- **Out-of-distribution drift.** Once the policy improves past the RM's training distribution, the RM stops giving useful signal — and may give actively misleading signal. You'll see the RM score keep climbing while task performance plateaus or regresses. The fix is RM retraining on fresh data; the deeper fix is having the RM detect OOD samples.
+
+- **Stylistic bias.** RMs trained on a particular style of writing (formal, conversational) will reward responses that match that style. The policy learns the style, not the substance.
+
+- **Length bias.** RMs trained on a corpus where longer responses were rated higher will reward length. The policy learns to be verbose.
+
+These show up as *reward hacking* — covered next.
+
+## §6 — Reward hacking, named
+
+Reward hacking is the policy finding ways to maximize the reward function that the human author did not intend. Five patterns worth knowing by name.
+
+<RewardHackingGallery />
+
+**Pattern 1: Verifier loophole.** The rule-based verifier accepts something the author didn't anticipate. Example: a math verifier that accepts any number in the response (not just at the marker). The policy learns to write the answer first, then narrate. Mitigation: tighten the verifier; use markers; reject responses missing the marker.
+
+**Pattern 2: RM exploitation.** The reward model has a stylistic preference (e.g., responses starting with "Certainly!") and the policy learns to satisfy that preference rather than the task. Mitigation: train the RM on more diverse data; add format checks as gates.
+
+**Pattern 3: Length exploitation.** The policy learns to produce verbose responses because (a) the RM was trained on a corpus where longer was better, or (b) the reward function rewards keyword matches that show up more in longer text. Mitigation: length-aware reward normalization; track response length as a metric; add a length penalty (carefully).
+
+**Pattern 4: Token-level cheating.** With token-level rewards (PRMs or KL adjustments), the policy can find tokens that game the per-token signal. Most dangerously, KL-in-reward can let the policy "spend" KL budget early on tokens that don't affect the answer, leaving more budget for the answer tokens. Mitigation: bound the KL per token; use in-loss KL; monitor per-position KL distribution.
+
+**Pattern 5: Mode collapse.** Not strictly hacking but adjacent: the policy converges to a small set of responses that all score moderately well, losing diversity. The reward function isn't being gamed, but the *behavior* is degenerate. Mitigation: entropy bonus; KL-from-reference penalty; diverse temperature during rollout.
+
+The pattern across all five: **rewards are specifications, and your specification has bugs.** You will only find the bugs by training and observing. A culture of "watch the rollouts" — actually reading what the policy generates — catches more reward-hacking than any single technical mitigation.
+
+## §7 — KL as a regularization reward
+
+The KL constraint to the reference policy is the only "reward" in most LLM RL runs that is not really about the task. It exists to keep the policy linguistically grounded.
+
+There are two places it can live (covered in detail in [the algorithm zoo post](/ashish-ai-blog/blog/verl-algorithm-zoo/)):
+
+- **In-reward** (`algorithm.use_kl_in_reward: true`): subtract β · KL(π_θ || π_ref) from the per-token reward. The KL is part of the reward signal that gets credit-assigned by the advantage estimator.
+- **In-loss**: add β · KL as an explicit term in the actor loss, bypassing the advantage estimator.
+
+For reward design, the main implication is: **in-reward KL competes with your task reward.** If task reward is on a scale of [0, 1] per response and per-token KL averages 0.01, then over a 200-token response the KL contribution is on the order of 2.0 — larger than the task reward. You have to set β carefully. The conventional default `β = 0.001` to `β = 0.01` is calibrated for this.
+
+A common pattern: an *adaptive KL controller* targets a desired KL divergence and adjusts β automatically. VERL exposes this:
+
+```yaml
+algorithm:
+  kl_ctrl:
+    type: adaptive
+    kl_coef: 0.001
+    target_kl: 0.1
+    horizon: 10000
+```
+
+The controller raises β when measured KL exceeds the target and lowers it otherwise.
+
+## §8 — Process rewards: building a PRM on VERL
+
+VERL ships ORM-first. There is no `PRMWorker`, no `process_reward` config block, no built-in segmentation of responses into reasoning steps. But the underlying machinery — token-level scores, per-token credit assignment via GAE or extended GRPO — *can* carry process rewards. You just have to build the pipeline yourself.
+
+<ORMvsPRM />
+
+The path:
+
+1. **Segment the response into steps.** Use a delimiter the model learns to produce (`\n\n`, `Step N:`, a special token). Your custom reward function gets the full response string and finds the step boundaries.
+
+2. **Score each step.** This is where the PRM model goes. The PRM takes (prompt, step-so-far, current-step) and produces a score. Typically a discriminative model trained on step-level annotations (PRM800K is the canonical dataset for math).
+
+3. **Populate `token_level_scores`.** Place each step's reward at the last token of that step:
+
+```python
+async def compute_score(data_source, solution_str, ground_truth, extra_info):
+    steps = segment_into_steps(solution_str)
+    step_scores = [await prm_score(s, extra_info["prompt"]) for s in steps]
+
+    # Build a per-token reward array
+    tokens = tokenizer.tokenize(solution_str)
+    rewards = [0.0] * len(tokens)
+    cursor = 0
+    for step_text, score in zip(steps, step_scores):
+        step_tokens = tokenizer.tokenize(step_text)
+        cursor += len(step_tokens)
+        rewards[cursor - 1] = score  # reward at end of step
+
+    return {"score": sum(step_scores), "extra_info": {"token_rewards": rewards}}
+```
+
+4. **Override the standard placement.** VERL's default places the response-level `score` at the last token. To use per-step rewards instead, you need a custom reward manager that writes your `token_rewards` array directly into `token_level_scores`. This is a ~50-line change in a subclass of `RewardManager`.
+
+5. **Run with `algorithm.adv_estimator: gae`.** GAE will propagate the step-level rewards backward through the response, giving you proper per-step credit assignment. GRPO will not — its broadcast pattern was designed for terminal rewards.
+
+What you lose, compared to a hypothetical first-class PRM in VERL:
+
+- No standardized PRM eval / calibration.
+- No native support for PRM beam search at rollout time (you can rollout with the PRM scoring branches, but you have to write the code).
+- No nice config knobs — everything is in your custom code.
+
+What you gain: the most accurate per-step credit assignment available in any open LLM RL framework today, if your PRM is well-trained.
+
+## §9 — Tool-level rewards (`BaseTool.calc_reward`)
+
+A small but useful capability: tools in VERL can return a reward at the end of the response, computed from their own internal state. The `BaseTool` interface has a `calc_reward(instance_id)` method that, if you implement it, gets called after the rollout and contributes to the response's total reward.
+
+Example: a calculator tool that rewards correct intermediate computations:
+
+```python
+class CalculatorTool(BaseTool):
+    async def execute(self, instance_id, parameters):
+        expr = parameters["expression"]
+        try:
+            result = eval(expr)
+            self._results[instance_id].append(result)
+            return ToolResponse(text=str(result))
+        except Exception as e:
+            self._errors[instance_id].append(str(e))
+            return ToolResponse(text=f"ERROR: {e}")
+
+    async def calc_reward(self, instance_id):
+        # Reward for using the tool successfully
+        successes = len(self._results.get(instance_id, []))
+        errors = len(self._errors.get(instance_id, []))
+        return 0.05 * successes - 0.02 * errors
+```
+
+This is a small additive bonus that nudges the policy toward effective tool use. It combines with the response-level reward in the framework's standard way.
+
+When to use it: when *how* the policy used the tool is part of what you're trying to teach, not just the final answer. Cautions: small coefficients, otherwise the policy learns to use the tool gratuitously.
+
+## §10 — Async and streaming rewards
+
+A subtle point that becomes important at scale: reward computation can be async with respect to the training loop. If your reward function takes several seconds (sandbox code execution, generative RM judging), you don't want the trainer waiting.
+
+VERL's reward manager dispatches reward computation in parallel for the batch — using async I/O for HTTP-routed RMs and process pools for sandbox executions. The trainer's `compute_rewards` call returns when all responses are scored, but the calls themselves run in parallel.
+
+What this means for your custom reward function:
+- Make it `async def`. Even if your work is CPU-bound, the framework will run multiple instances concurrently.
+- If you call external services, use `aiohttp` or similar — don't block.
+- Cap timeouts. A slow response should resolve to a 0 reward, not hang the training step.
+
+For *streaming* rewards (the rollout engine emits tokens; rewards are computed as tokens arrive), VERL is moving in this direction but it's not a stable surface yet. The pattern would be: the rollout sends partial responses to a streaming RM; the RM returns intermediate scores; these feed into a smoother credit assignment. This is on the roadmap but not in the v0.7 stable interface.
+
+## §11 — Custom reward managers
+
+When you need behavior the standard `RewardManager` doesn't provide — bespoke aggregation, PRM placement, conditional reward routing — you subclass.
+
+The interface:
+
+```python
+from verl.workers.reward_manager import RewardManager
+
+class MyRewardManager(RewardManager):
+    async def compute_rewards(self, data: DataProto) -> DataProto:
+        # data.batch contains responses, prompts, etc.
+        # populate data.batch["token_level_scores"] of shape (B, T_resp)
+        # return data
+        ...
+```
+
+Point VERL at your subclass via `reward_model.reward_manager: your_module:MyRewardManager`. The trainer treats it identically.
+
+Common reasons to subclass:
+- PRM placement (see §8).
+- Multi-stage rewards (a fast rule-based check followed by a slow RM call only if the fast check passes).
+- Cross-response rewards (the reward for a response depends on the *other* responses in the same group — useful for diversity bonuses).
+- Conditional routing (different reward function per data source in a mixed-task batch).
+
+## §12 — Limits and current state
+
+What VERL's reward machinery does well today:
+- Composition is clean — multiple sources fan in additively.
+- Async dispatch is mature; reward latency is parallelizable.
+- The HTTP-router pattern for RMs scales cleanly.
+- Custom reward functions are plug-and-play.
+
+What is less mature:
+- **PRM as a first-class concept.** You can build it (§8), but the experience is do-it-yourself.
+- **Reward model calibration tooling.** No standardized "is your RM well-calibrated for this policy distribution" diagnostic.
+- **Multi-objective optimization.** When task reward and KL push opposite directions, you tune coefficients by hand. Pareto-front methods aren't supported.
+- **Reward hacking detection.** No built-in monitoring for the five patterns above — you have to instrument it yourself.
+
+## §13 — A mental model
+
+The reward function is your interface to the optimization process. Everything you want the policy to do has to be expressible as a number it can climb. Everything you don't want has to be either *not rewarded* (the policy will ignore it, mostly) or *penalized* (the policy will learn to avoid it). The space between is where reward hacking lives.
+
+VERL's design pushes you toward a clean separation: write a `compute_score` function, configure RM workers in YAML, let the framework plumb the rest. This is *exactly the right division of labor*. The framework cannot anticipate what your task needs; you cannot anticipate the framework's plumbing. The interface is small and stable.
+
+The cost is that the framework cannot save you from bad reward design. If your reward has a verifier loophole, no algorithm choice will fix it. If your RM has a stylistic bias, no training run will surface the bias unless you read the rollouts. The reward is the most powerful place to spend your design budget.
+
+The next post in this series goes deep on the multi-turn machinery — the rollout side of the loop, where the responses your reward function will score are actually produced.
+
+## References
+
+- Skalse, J., Howe, N., Krasheninnikov, D., Krueger, D. (2022). *Defining and Characterizing Reward Hacking.* [arXiv:2209.13085](https://arxiv.org/abs/2209.13085).
+- Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J., Sutskever, I., Cobbe, K. (2023). *Let's Verify Step by Step.* [arXiv:2305.20050](https://arxiv.org/abs/2305.20050). (PRM800K dataset.)
+- Mahan, D., Phung, D., Rafailov, R., Blagden, C., Lile, N., Castricato, L., Fränken, J.-P., Finn, C., Albalak, A. (2024). *Generative Reward Models.* [arXiv:2408.15240](https://arxiv.org/abs/2408.15240).
+- Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., Hesse, C., Schulman, J. (2021). *Training Verifiers to Solve Math Word Problems.* [arXiv:2110.14168](https://arxiv.org/abs/2110.14168). (GSM8K.)
+- [VERL reward manager source](https://github.com/verl-project/verl/tree/main/verl/workers/reward_manager)
+- [VERL custom reward function docs](https://verl.readthedocs.io/en/latest/preparation/reward_function.html)

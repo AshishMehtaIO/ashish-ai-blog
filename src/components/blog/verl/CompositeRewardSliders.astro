@@ -1,0 +1,233 @@
+---
+// Viz — Composite reward sliders. Three components (correctness, format,
+// length) with adjustable weights. Plot which one dominates the gradient
+// as weights shift.
+---
+
+<figure class="cr-figure" aria-label="Composite reward weight explorer">
+  <div class="cr-controls">
+    <label class="cr-slider">
+      <span class="cr-label">w_correct</span>
+      <input type="range" min="0" max="100" step="1" value="80" data-control="w-correct" />
+      <output data-readout="w-correct">0.80</output>
+    </label>
+    <label class="cr-slider">
+      <span class="cr-label">w_format</span>
+      <input type="range" min="0" max="100" step="1" value="15" data-control="w-format" />
+      <output data-readout="w-format">0.15</output>
+    </label>
+    <label class="cr-slider">
+      <span class="cr-label">w_length</span>
+      <input type="range" min="0" max="100" step="1" value="5" data-control="w-length" />
+      <output data-readout="w-length">0.05</output>
+    </label>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="cr-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <text x="14" y="40" class="cr-axis-label">reward score over 4 sample responses</text>
+
+    <!-- Four sample responses with different (correct, format, length-good) values -->
+    <g data-region="samples"></g>
+
+    <text x="380" y="265" class="cr-axis-label" text-anchor="middle">sample responses</text>
+  </svg>
+
+  <div class="cr-warning" data-region="warning">
+    <p data-readout="warning"></p>
+  </div>
+
+  <figcaption>
+    Four hypothetical responses, scored against three component rewards: correctness (does the
+    answer match), format (does it follow the convention), length-good (is it appropriately
+    concise). The total reward is the weighted sum. Move the sliders to see when format or
+    length dominates — and when the gradient stops pointing toward correctness.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    type Sample = { name: string; correct: number; format: number; length: number };
+    const SAMPLES: Sample[] = [
+      { name: 'A: correct + good format + long', correct: 1.0, format: 1.0, length: 0.3 },
+      { name: 'B: wrong + great format + concise', correct: 0.0, format: 1.0, length: 1.0 },
+      { name: 'C: correct + bad format + concise', correct: 1.0, format: 0.2, length: 1.0 },
+      { name: 'D: correct + great format + concise', correct: 1.0, format: 1.0, length: 1.0 },
+    ];
+
+    document.querySelectorAll<HTMLElement>('.cr-figure').forEach((fig) => {
+      const samplesG = fig.querySelector<SVGGElement>('[data-region="samples"]')!;
+      const wcInput = fig.querySelector<HTMLInputElement>('[data-control="w-correct"]')!;
+      const wfInput = fig.querySelector<HTMLInputElement>('[data-control="w-format"]')!;
+      const wlInput = fig.querySelector<HTMLInputElement>('[data-control="w-length"]')!;
+      const wcOut = fig.querySelector<HTMLOutputElement>('[data-readout="w-correct"]')!;
+      const wfOut = fig.querySelector<HTMLOutputElement>('[data-readout="w-format"]')!;
+      const wlOut = fig.querySelector<HTMLOutputElement>('[data-readout="w-length"]')!;
+      const warningEl = fig.querySelector<HTMLElement>('[data-readout="warning"]')!;
+
+      function render() {
+        const total = parseInt(wcInput.value, 10) + parseInt(wfInput.value, 10) + parseInt(wlInput.value, 10) || 1;
+        const wc = parseInt(wcInput.value, 10) / total;
+        const wf = parseInt(wfInput.value, 10) / total;
+        const wl = parseInt(wlInput.value, 10) / total;
+        wcOut.value = wc.toFixed(2);
+        wfOut.value = wf.toFixed(2);
+        wlOut.value = wl.toFixed(2);
+
+        samplesG.replaceChildren();
+
+        const X_START = 80;
+        const X_END = 700;
+        const BAR_GROUP_W = (X_END - X_START) / SAMPLES.length;
+        const BAR_W = BAR_GROUP_W * 0.6;
+
+        SAMPLES.forEach((s, i) => {
+          const xCenter = X_START + i * BAR_GROUP_W + BAR_GROUP_W / 2;
+          const score = wc * s.correct + wf * s.format + wl * s.length;
+          const cContrib = wc * s.correct;
+          const fContrib = wf * s.format;
+          const lContrib = wl * s.length;
+
+          // Stacked bar
+          const x = xCenter - BAR_W / 2;
+          const Y_BASE = 230;
+          const Y_TOP = 60;
+          const SCALE = (Y_BASE - Y_TOP) / 1.0;
+
+          let yCursor = Y_BASE;
+          const heights = [
+            { val: cContrib, cls: 'cr-seg-correct' },
+            { val: fContrib, cls: 'cr-seg-format' },
+            { val: lContrib, cls: 'cr-seg-length' },
+          ];
+          heights.forEach((h) => {
+            if (h.val < 1e-9) return;
+            const pxH = h.val * SCALE;
+            yCursor -= pxH;
+            el('rect', { x, y: yCursor, width: BAR_W, height: pxH, class: `cr-seg ${h.cls}` }, samplesG);
+          });
+
+          // Sample label
+          el('text', { x: xCenter, y: 250, class: 'cr-sample-label', 'text-anchor': 'middle' }, samplesG).textContent = `(${i + 1})`;
+
+          // Total score above bar
+          el('text', { x: xCenter, y: Math.max(50, yCursor - 6), class: 'cr-score-label', 'text-anchor': 'middle' }, samplesG).textContent = score.toFixed(2);
+        });
+
+        // Determine if a non-correctness component dominates
+        const scores = SAMPLES.map((s) => wc * s.correct + wf * s.format + wl * s.length);
+        const bestIdx = scores.indexOf(Math.max(...scores));
+        let warning = '';
+        if (bestIdx === 1) {
+          warning = '⚠ Response B (wrong answer, great format, concise) is the top-scoring response under these weights. The gradient now points toward "format + brevity" instead of correctness. This is the format-exploitation failure mode.';
+        } else if (scores[3] - scores[0] < 0.05) {
+          warning = 'Responses A and D both score near the top — but A is much longer. If you do not penalize length more, the policy can produce verbose-but-correct responses indefinitely.';
+        } else if (bestIdx === 3) {
+          warning = '✓ Response D (correct + good format + concise) is the top-scoring response. Gradient points the right way. These weights look workable as a starting point.';
+        }
+        warningEl.textContent = warning;
+
+        // Legend at top — set as part of svg
+        renderLegend(samplesG);
+      }
+
+      function renderLegend(parent: SVGGElement) {
+        const items = [
+          { color: '#4a8a3d', label: 'correctness' },
+          { color: '#d08a3e', label: 'format' },
+          { color: '#6b4ab8', label: 'length-good' },
+        ];
+        items.forEach((it, i) => {
+          const x = 80 + i * 170;
+          const y = 18;
+          el('rect', { x, y, width: 10, height: 10, fill: it.color, opacity: 0.85 }, parent);
+          const t = el('text', { x: x + 16, y: y + 9, class: 'cr-legend-label' }, parent);
+          (t as Element).textContent = it.label;
+        });
+      }
+
+      wcInput.addEventListener('input', render);
+      wfInput.addEventListener('input', render);
+      wlInput.addEventListener('input', render);
+      render();
+    });
+  })();
+</script>
+
+<style>
+  .cr-figure { margin: 2.5rem 0; max-width: 880px; }
+  .cr-controls {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.85rem;
+    margin-bottom: 0.6rem;
+  }
+  @media (max-width: 640px) { .cr-controls { grid-template-columns: 1fr; } }
+  .cr-slider {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .cr-label {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-faint);
+  }
+  .cr-slider input[type="range"] { accent-color: var(--accent); }
+  .cr-slider output {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    min-width: 2.5rem;
+    text-align: right;
+  }
+  .cr-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .cr-axis-label { fill: var(--text-faint); font-size: 10px; font-family: var(--font-sans); }
+  .cr-figure :global(.cr-seg-correct) { fill: #4a8a3d; opacity: 0.85; }
+  .cr-figure :global(.cr-seg-format) { fill: #d08a3e; opacity: 0.85; }
+  .cr-figure :global(.cr-seg-length) { fill: #6b4ab8; opacity: 0.85; }
+  .cr-figure :global(.cr-sample-label) {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .cr-figure :global(.cr-score-label) {
+    fill: var(--text);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .cr-figure :global(.cr-legend-label) {
+    fill: var(--text-muted);
+    font-size: 10.5px;
+    font-family: var(--font-sans);
+  }
+  .cr-warning {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    min-height: 2rem;
+  }
+  .cr-warning p {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+</style>

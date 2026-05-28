@@ -1,0 +1,234 @@
+---
+// Viz — ORM vs PRM credit assignment. Same response, two animations:
+// ORM places one terminal reward; PRM places per-step rewards. Show how
+// GAE propagates each backward.
+---
+
+<figure class="op-figure" aria-label="ORM vs PRM credit assignment">
+  <div class="op-tabs" role="tablist">
+    <button type="button" role="tab" class="op-tab active" data-mode="orm" aria-selected="true">ORM (default)</button>
+    <button type="button" role="tab" class="op-tab"        data-mode="prm" aria-selected="false">PRM (extension)</button>
+    <button type="button" role="tab" class="op-tab"        data-mode="both" aria-selected="false">Compare</button>
+  </div>
+
+  <svg viewBox="0 0 720 280" class="op-svg" preserveAspectRatio="xMidYMid meet" role="img">
+    <text x="20" y="40" class="op-row-label">response tokens</text>
+    <text x="20" y="120" class="op-row-label">token_level_scores</text>
+    <text x="20" y="220" class="op-row-label">propagated advantage</text>
+
+    <g data-region="tokens"></g>
+    <g data-region="scores"></g>
+    <g data-region="advantages"></g>
+
+    <text x="380" y="265" class="op-axis-label" text-anchor="middle">token position →</text>
+  </svg>
+
+  <div class="op-callout">
+    <p data-region="callout"></p>
+  </div>
+
+  <figcaption>
+    Same 24-token response, four "reasoning steps." ORM places one terminal reward at the last
+    token; GAE propagates it backward across the response. PRM places one reward per step
+    boundary; GAE credits each step separately. The PRM view rewards correct intermediate
+    reasoning even if the final answer is wrong.
+  </figcaption>
+</figure>
+
+<script>
+  (function () {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag: string, attrs: Record<string, string | number>, parent: Element) {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+      parent.appendChild(e);
+      return e;
+    }
+
+    const T = 24;
+    const STEP_BOUNDARIES = [5, 11, 17, 23]; // last token of each step (0-indexed)
+    const STEP_REWARDS_PRM = [0.6, 0.8, 0.4, 1.0];
+    const ORM_REWARD = 1.0;
+    const X_START = 110;
+    const X_END = 700;
+    const BAR_W = (X_END - X_START) / T - 2;
+    const STEP_X = (X_END - X_START) / T;
+
+    function rowY(row: 'token' | 'score' | 'adv') {
+      return row === 'token' ? 50 : row === 'score' ? 130 : 230;
+    }
+
+    // GAE propagation: λ=0.95, γ=1.0
+    function propagate(rewards: number[]) {
+      const adv = Array(T).fill(0);
+      const gamma = 1.0, lam = 0.95;
+      let gae = 0;
+      for (let t = T - 1; t >= 0; t--) {
+        const delta = rewards[t];
+        gae = delta + gamma * lam * gae;
+        adv[t] = gae;
+      }
+      return adv;
+    }
+
+    function renderTokens(parent: SVGGElement) {
+      parent.replaceChildren();
+      for (let t = 0; t < T; t++) {
+        const x = X_START + t * STEP_X + 1;
+        const isBoundary = STEP_BOUNDARIES.includes(t);
+        const stepIdx = STEP_BOUNDARIES.findIndex((b) => t <= b);
+        el('rect', {
+          x, y: 60, width: BAR_W, height: 14,
+          rx: 2,
+          class: `op-tok op-tok-step-${stepIdx}${isBoundary ? ' op-tok-boundary' : ''}`
+        }, parent);
+      }
+      // Step labels
+      let prev = 0;
+      STEP_BOUNDARIES.forEach((b, i) => {
+        const midToken = (prev + b) / 2;
+        const x = X_START + midToken * STEP_X + STEP_X / 2;
+        el('text', { x, y: 90, class: 'op-step-label', 'text-anchor': 'middle' }, parent).textContent = `step ${i + 1}`;
+        prev = b + 1;
+      });
+    }
+
+    function renderScores(parent: SVGGElement, mode: 'orm' | 'prm') {
+      parent.replaceChildren();
+      const scores = Array(T).fill(0);
+      if (mode === 'orm') {
+        scores[T - 1] = ORM_REWARD;
+      } else {
+        STEP_BOUNDARIES.forEach((b, i) => { scores[b] = STEP_REWARDS_PRM[i]; });
+      }
+      const maxAbs = 1.0;
+      for (let t = 0; t < T; t++) {
+        if (Math.abs(scores[t]) < 1e-9) continue;
+        const x = X_START + t * STEP_X + 1;
+        const h = (scores[t] / maxAbs) * 50;
+        el('rect', {
+          x, y: 130 - h, width: BAR_W, height: h,
+          class: 'op-bar op-bar-score'
+        }, parent);
+        el('text', {
+          x: x + BAR_W / 2, y: 130 - h - 4,
+          class: 'op-bar-value', 'text-anchor': 'middle'
+        }, parent).textContent = scores[t].toFixed(2);
+      }
+    }
+
+    function renderAdvantages(parent: SVGGElement, mode: 'orm' | 'prm') {
+      parent.replaceChildren();
+      const scores = Array(T).fill(0);
+      if (mode === 'orm') {
+        scores[T - 1] = ORM_REWARD;
+      } else {
+        STEP_BOUNDARIES.forEach((b, i) => { scores[b] = STEP_REWARDS_PRM[i]; });
+      }
+      const adv = propagate(scores);
+      const maxAbs = Math.max(0.1, ...adv.map(Math.abs));
+      for (let t = 0; t < T; t++) {
+        const x = X_START + t * STEP_X + 1;
+        const h = (adv[t] / maxAbs) * 50;
+        const y = h >= 0 ? 230 - h : 230;
+        el('rect', {
+          x, y, width: BAR_W, height: Math.abs(h),
+          class: `op-bar ${h >= 0 ? 'op-bar-adv-pos' : 'op-bar-adv-neg'}`
+        }, parent);
+      }
+    }
+
+    const CALLOUTS = {
+      orm: 'ORM places a single terminal reward. GAE propagates it backward with decay (γλ ≈ 0.95). Early tokens receive a fraction of the credit. If the answer is wrong, every token gets 0 — no information about which step caused the failure.',
+      prm: 'PRM places a reward at each step boundary. GAE propagates each independently. Now the policy gets a positive gradient for steps 1 and 2 even though step 3 was weak. The credit assignment is much sharper.',
+      both: 'ORM vs PRM, same response. ORM: 0 reward except at the end. PRM: a reward per step. The advantage profile under PRM is much more informative — and that informativeness is exactly what makes process reward models valuable.',
+    } as const;
+
+    document.querySelectorAll<HTMLElement>('.op-figure').forEach((fig) => {
+      const tokensG = fig.querySelector<SVGGElement>('[data-region="tokens"]')!;
+      const scoresG = fig.querySelector<SVGGElement>('[data-region="scores"]')!;
+      const advG = fig.querySelector<SVGGElement>('[data-region="advantages"]')!;
+      const calloutEl = fig.querySelector<HTMLElement>('[data-region="callout"]')!;
+      const tabs = Array.from(fig.querySelectorAll<HTMLButtonElement>('.op-tab'));
+
+      renderTokens(tokensG);
+
+      function show(mode: 'orm' | 'prm' | 'both') {
+        if (mode === 'both') {
+          // For "both", show PRM (it's the more informative case)
+          renderScores(scoresG, 'prm');
+          renderAdvantages(advG, 'prm');
+        } else {
+          renderScores(scoresG, mode);
+          renderAdvantages(advG, mode);
+        }
+        calloutEl.textContent = CALLOUTS[mode];
+      }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => {
+          tabs.forEach((tt) => {
+            const active = tt === t;
+            tt.classList.toggle('active', active);
+            tt.setAttribute('aria-selected', String(active));
+          });
+          show((t.getAttribute('data-mode') || 'orm') as 'orm' | 'prm' | 'both');
+        });
+      });
+
+      show('orm');
+    });
+  })();
+</script>
+
+<style>
+  .op-figure { margin: 2.5rem 0; max-width: 880px; }
+  .op-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .op-tab {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+    padding: 0.4rem 0.95rem;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .op-tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .op-svg {
+    width: 100%; height: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .op-row-label {
+    fill: var(--text);
+    font-size: 12px;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-weight: 600;
+  }
+  .op-axis-label { fill: var(--text-faint); font-size: 10px; }
+
+  .op-figure :global(.op-tok) { opacity: 0.6; }
+  .op-figure :global(.op-tok-step-0) { fill: #dde5f3; stroke: #4a78c2; stroke-width: 0.5; }
+  .op-figure :global(.op-tok-step-1) { fill: #f5e0c3; stroke: #d08a3e; stroke-width: 0.5; }
+  .op-figure :global(.op-tok-step-2) { fill: #e3d9f3; stroke: #6b4ab8; stroke-width: 0.5; }
+  .op-figure :global(.op-tok-step-3) { fill: #d8ecd1; stroke: #4a8a3d; stroke-width: 0.5; }
+  .op-figure :global(.op-tok-boundary) { stroke-width: 2; opacity: 1; }
+  .op-figure :global(.op-step-label) { fill: var(--text-muted); font-size: 9.5px; font-family: var(--font-mono); }
+
+  .op-figure :global(.op-bar-score) { fill: #4a8a3d; opacity: 0.9; }
+  .op-figure :global(.op-bar-value) { fill: var(--text-muted); font-size: 9.5px; font-family: var(--font-mono); }
+  .op-figure :global(.op-bar-adv-pos) { fill: var(--accent); opacity: 0.85; }
+  .op-figure :global(.op-bar-adv-neg) { fill: #b85c5c; opacity: 0.85; }
+
+  .op-callout {
+    margin-top: 0.85rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .op-callout p { margin: 0; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text); line-height: 1.55; }
+</style>
